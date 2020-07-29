@@ -15,6 +15,14 @@
 //    misrepresented as being the original software.
 // 3. This notice may not be removed or altered from any source distribution.
 //
+
+// highlight
+#define NANOVG_GL3
+#define NANOVG_GL_IMPLEMENTATION
+#include <gl/GL.h>
+
+// clang-format off
+
 #ifndef NANOVG_GL_H
 #define NANOVG_GL_H
 

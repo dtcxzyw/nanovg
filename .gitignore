@@ -26,3 +26,5 @@ build/*
 
 ## xcode specific
 *xcuserdata*
+src/.vs
+src/x64

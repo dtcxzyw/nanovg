@@ -29,6 +29,11 @@ namespace DE = Diligent;
 
 #include "nanovg.h"
 
+enum NVGCreateFlags {
+    NVG_STENCIL_STROKES = 1 << 0,
+};
+
 NVGcontext* nvgCreateDE(DE::IRenderDevice* device, DE::IDeviceContext* context,
-                        int MSAA, DE::TEXTURE_FORMAT colorFormat,DE::TEXTURE_FORMAT depthFormat);
+                        int MSAA, DE::TEXTURE_FORMAT colorFormat,
+                        DE::TEXTURE_FORMAT depthFormat, int flags);
 void nvgDeleteDE(NVGcontext* ctx);

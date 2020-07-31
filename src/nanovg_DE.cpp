@@ -185,9 +185,11 @@ struct NVGDEContext final {
 
     std::vector<NVGDECall> calls;
 
-    float viewSize[2];
     DE::TEXTURE_FORMAT colorFormat, depthFormat;
     DE::RefCntAutoPtr<DE::IBuffer> viewConstant, uniform;
+
+    DE::RefCntAutoPtr<DE::IBuffer> triangleFansIndex;
+    int indexSize;
 };
 
 static const char* vertShader = R"(
@@ -364,7 +366,7 @@ static int nvgde_renderCreate(void* uptr) {
         [context](const DE::PipelineStateDesc& PSODesc) {
             DE::PipelineStateCreateInfo PSOCI;
             PSOCI.PSODesc = PSODesc;
-            // TODO:ResourceLayout
+            // TODO:ResourceLayout StaticSampler
             throw;
             NVGDEPipelineState pipeline;
             context->device->CreatePipelineState(PSOCI, &pipeline.PSO);
@@ -456,21 +458,59 @@ static int nvgde_renderGetTextureSize(void* uptr, int image, int* w, int* h) {
 static void nvgde_renderViewport(void* uptr, float width, float height,
                                  float devicePixelRatio) {
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
-    context->viewSize[0] = width;
-    context->viewSize[1] = height;
+    DE::MapHelper<float> guard(context->context, context->uniform,
+                               DE::MAP_WRITE, DE::MAP_FLAG_DISCARD);
+    auto ptr = static_cast<float*>(guard);
+    ptr[0] = width;
+    ptr[1] = height;
 }
 static void nvgde_renderCancel(void* uptr) {
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
     context->calls.clear();
 }
 static void bindUniform(NVGDEContext* context, const Uniform& uni) {
-    context->context->UpdateBuffer(
-        context->uniform, 0, 44 * sizeof(float), &uni,
-        DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    DE::MapHelper<Uniform> guard(context->context, context->uniform,
+                                 DE::MAP_WRITE, DE::MAP_FLAG_DISCARD);
+    *guard = uni;
 }
 static void bindTex(DE::IShaderResourceBinding* SRB, const NVGDETexture& tex) {
     SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gTextureSampler")
         ->Set(tex.texView);
+}
+static void prepareTriangleFansIndexBuffer(NVGDEContext* context, int siz) {
+    if(siz <= context->indexSize)
+        return;
+    auto nearestPowerOf2 = [](int siz) {
+        int res = 1;
+        while(res < siz)
+            res <<= 1;
+        return res;
+    };
+    context->indexSize = nearestPowerOf2(siz);
+    context->triangleFansIndex.Release();
+    DE::BufferDesc bufferDesc = {};
+    bufferDesc.BindFlags = DE::BIND_INDEX_BUFFER;
+    bufferDesc.CPUAccessFlags = DE::CPU_ACCESS_NONE;
+    bufferDesc.Mode = DE::BUFFER_MODE_RAW;
+    bufferDesc.Name = "NanoVG Triangle Fans Index Buffer";
+    bufferDesc.uiSizeInBytes = siz * 3 * sizeof(int);
+    bufferDesc.Usage = DE::USAGE_STATIC;
+
+    std::vector<int> index(3 * siz);
+    int* ptr = index.data();
+    for(int i = 0; i < siz; ++i) {
+        ++ptr;
+        *ptr = i + 1;
+        ++ptr;
+        *ptr = i + 2;
+        ++ptr;
+    }
+
+    DE::BufferData bufferData = {};
+    bufferData.DataSize = siz * 3 * sizeof(int);
+    bufferData.pData = data.data();
+    context->device->CreateBuffer(bufferDesc, &bufferData,
+                                  &(context->triangleFansIndex));
 }
 static void nvgde_renderFlush(void* uptr) {
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
@@ -504,7 +544,7 @@ static void nvgde_renderFlush(void* uptr) {
                 blend.RenderTargetWriteMask = 0;
 
                 // set bindpoint for solid loc
-                bindUniform(context, call.uniform);
+                bindUniform(context, call.uniform[0]);
 
                 stencilFront.StencilFailOp = stencilFront.StencilDepthFailOp =
                     stencilBack.StencilFailOp = stencilBack.StencilDepthFailOp =
@@ -513,8 +553,7 @@ static void nvgde_renderFlush(void* uptr) {
                 stencilBack.StencilPassOp = DE::STENCIL_OP_DECR_WRAP;
                 rasterizer.CullMode = DE::CULL_MODE_NONE;
                 curState.GraphicsPipeline.PrimitiveTopology =
-                    DE::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;  // TODO:TRIANGLE_FAN
-                throw;
+                    DE::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
                 NVGDEPipelineState& pipeline = context->pipeline.get(curState);
                 immediateContext->SetPipelineState(pipeline.PSO);
@@ -523,16 +562,40 @@ static void nvgde_renderFlush(void* uptr) {
                 immediateContext->CommitShaderResources(
                     pipeline.SRB,
                     DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-                for(int i = 0; i < npaths; i++)
+                for(const auto& path : call.path) {
+                    prepareTriangleFansIndexBuffer(path.fillCount - 2);
+                    immediateContext->SetIndexBuffer(
+                        context->triangleFansIndex);
+
+                    {
+                        DE::IBuffer* buf = mResource->inst;
+                        DE::Uint32 voff = 0;
+                        immediateContext->SetVertexBuffers(
+                            0, 1, &buf, &voff,
+                            DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
+                            DE::SET_VERTEX_BUFFERS_FLAG_RESET);
+                    }
+
+                    immediateContext->CommitShaderResources(
+                        pipeline.SRB,
+                        DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
                     glDrawArrays(GL_TRIANGLE_FAN, paths[i].fillOffset,
                                  paths[i].fillCount);
+                    DE::DrawIndexedAttribs DIA = {};
+                    DIA.BaseVertex = ;
+                    DIA.FirstIndexLocation = ;
+                    DIA.Flags = ;
+                    DIA.IndexType = ;
+                    DIA.NumIndices = ;
+                    immediateContext->DrawIndexed(DIA);
+                }
                 rasterizer.CullMode = DE::CULL_MODE_BACK;
 
                 // Draw anti-aliased pixels
                 blend.RenderTargetWriteMask = DE::COLOR_MASK_ALL;
 
-                glnvg__setUniforms(gl, call->uniformOffset + gl->fragSize,
-                                   call->image);
+                bindUniform(context, call.uniform[1]);
+                bindTex(context, call.image);
 
                 if(context->MSAA == 1) {
                     glnvg__stencilFunc(gl, GL_EQUAL, 0x00, 0xff);
@@ -876,6 +939,7 @@ NVGcontext* nvgCreateDE(DE::IRenderDevice* device, DE::IDeviceContext* context,
     ptr->colorFormat = colorFormat;
     ptr->depthFormat = depthFormat;
     ptr->flags = flags;
+    ptr->indexSize = 0;
     ptr->sampler.setGenerator(
         [device](int flags) { return generateSampler(device, flags); });
 

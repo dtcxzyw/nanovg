@@ -87,18 +87,20 @@ public:
 template <typename Key, typename T, typename Hasher = std::hash<Key>>
 class StateCache final {
 private:
-    std::unordered_map<Key, T, Hasher> mMap;
+    std::unordered_map<size_t, T> mMap;
     std::function<T(const Key&)> mGenerator;
+    Hasher mHasher;
 
 public:
     void setGenerator(const std::function<T(const Key&)>& gen) {
         mGenerator = gen;
     }
     T& get(const Key& key) {
-        auto iter = mMap.find(key);
+        size_t hv = mHasher(key);
+        auto iter = mMap.find(hv);
         if(iter != mMap.end())
             return iter->second;
-        T& res = mMap[key];
+        T& res = mMap[hv];
         res = mGenerator(key);
         return res;
     }
@@ -125,9 +127,9 @@ struct NVGDEPath {
 
 struct NVGDECall final {
     Type type;
-    int image;
-    std::vector<NVGDEPath> path;
+    int image, vertOffset, triangleOffset, triangleCount;
     std::vector<NVGvertex> vert;
+    std::vector<NVGDEPath> path;
     Uniform uniform[2];
     BlendFunc blendFunc;
 };
@@ -137,9 +139,9 @@ struct StateHasher final {
         // FNV-1a
         size_t res = static_cast<size_t>(
             sizeof(size_t) == 4 ? 2166136261ULL : 14695981039346656037ULL);
-        constexpr size_t prime = static_cast<size_t>(
-            sizeof(size_t) == 4 ? 16777619ULL : 1099511628211ULL);
         auto push = [&res](const auto& x) {
+            constexpr size_t prime = static_cast<size_t>(
+                sizeof(size_t) == 4 ? 16777619ULL : 1099511628211ULL);
             auto ptr = reinterpret_cast<const unsigned char*>(&x);
             auto end = ptr + sizeof(x);
             while(ptr < end) {
@@ -289,7 +291,8 @@ void PS(in PSInput pin,out float4 result:SV_TARGET) {
     }
 }
 )";
-
+static int nvgde_renderCreateTexture(void* uptr, int type, int w, int h,
+                                     int imageFlags, const unsigned char* data);
 static int nvgde_renderCreate(void* uptr) {
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
 
@@ -473,7 +476,7 @@ static void bindUniform(NVGDEContext* context, const Uniform& uni) {
                                  DE::MAP_WRITE, DE::MAP_FLAG_DISCARD);
     *guard = uni;
 }
-static void bindTex(DE::IShaderResourceBinding* SRB, const NVGDETexture& tex) {
+static void bindTex(DE::IShaderResourceBinding* SRB, NVGDETexture& tex) {
     SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gTextureSampler")
         ->Set(tex.texView);
 }
@@ -508,9 +511,12 @@ static void prepareTriangleFansIndexBuffer(NVGDEContext* context, int siz) {
 
     DE::BufferData bufferData = {};
     bufferData.DataSize = siz * 3 * sizeof(int);
-    bufferData.pData = data.data();
+    bufferData.pData = index.data();
     context->device->CreateBuffer(bufferDesc, &bufferData,
                                   &(context->triangleFansIndex));
+    context->context->SetIndexBuffer(
+        context->triangleFansIndex, 0U,
+        DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
 }
 static void nvgde_renderFlush(void* uptr) {
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
@@ -522,6 +528,89 @@ static void nvgde_renderFlush(void* uptr) {
     auto&& depthStencil = curState.GraphicsPipeline.DepthStencilDesc;
     auto&& stencilFront = depthStencil.FrontFace;
     auto&& stencilBack = depthStencil.BackFace;
+    auto&& primitiveTopology = curState.GraphicsPipeline.PrimitiveTopology;
+
+    DE::RefCntAutoPtr<DE::IBuffer> vertBuffer;
+    {
+        size_t siz = 0;
+        for(auto& call : context->calls) {
+            call.vertOffset = siz;
+            siz += static_cast<int>(call.vert.size());
+        }
+
+        std::vector<NVGvertex> verts(siz);
+        for(auto&& call : context->calls) {
+            memcpy(verts.data() + call.vertOffset, call.vert.data(),
+                   call.vert.size() * sizeof(NVGvertex));
+        }
+        DE::BufferDesc bufDesc = {};
+        bufDesc.BindFlags = DE::BIND_VERTEX_BUFFER;
+        bufDesc.CPUAccessFlags = DE::CPU_ACCESS_NONE;
+        bufDesc.Mode = DE::BUFFER_MODE_RAW;
+        bufDesc.Name = "NanoVG Vertex Buffer";
+        bufDesc.uiSizeInBytes =
+            static_cast<DE::Uint32>(siz * sizeof(NVGvertex));
+        bufDesc.Usage = DE::USAGE_STATIC;
+        DE::BufferData bufData = {};
+        bufData.DataSize = bufDesc.uiSizeInBytes;
+        bufData.pData = verts.data();
+        context->device->CreateBuffer(bufDesc, &bufData, &vertBuffer);
+        DE::IBuffer* buf = vertBuffer;
+        DE::Uint32 voff = 0;
+        immediateContext->SetVertexBuffers(
+            0, 1, &buf, &voff, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
+            DE::SET_VERTEX_BUFFERS_FLAG_RESET);
+    }
+
+    auto setStencil = [&](DE::Uint32 ref, DE::Uint32 mask,
+                          DE::COMPARISON_FUNCTION func, DE::STENCIL_OP sfail,
+                          DE::STENCIL_OP zfail, DE::STENCIL_OP zpass) {
+        immediateContext->SetStencilRef(ref);
+        depthStencil.StencilReadMask = depthStencil.StencilWriteMask = mask;
+        stencilFront.StencilFunc = stencilBack.StencilFunc = func;
+        stencilFront.StencilFailOp = stencilBack.StencilFailOp = sfail;
+        stencilFront.StencilDepthFailOp = stencilBack.StencilDepthFailOp =
+            zfail;
+        stencilFront.StencilPassOp = stencilBack.StencilPassOp = zpass;
+    };
+
+    auto prepareRendering = [&](int image) {
+        NVGDEPipelineState& pipeline = context->pipeline.get(curState);
+        immediateContext->SetPipelineState(pipeline.PSO);
+        bindTex(pipeline.SRB, context->texture.get(image));
+        immediateContext->CommitShaderResources(
+            pipeline.SRB, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    };
+
+    auto drawStroke = [&](const NVGDECall& call, int image) {
+        prepareRendering(image);
+        for(const auto& path : call.path)
+            if(path.strokeCount > 0) {
+                DE::DrawAttribs DA = {};
+                DA.NumVertices = path.strokeCount;
+                DA.StartVertexLocation = call.vertOffset + path.strokeOffset;
+                immediateContext->Draw(DA);
+            }
+    };
+
+    auto drawFans = [&](const NVGDECall& call, int image) {
+        prepareRendering(image);
+        for(const auto& path : call.path) {
+            DE::DrawIndexedAttribs DIA = {};
+            DIA.BaseVertex = call.vertOffset + path.fillOffset;
+            DIA.IndexType = DE::VT_UINT32;
+            DIA.NumIndices = 3U * static_cast<DE::Uint32>(path.fillCount - 2);
+            immediateContext->DrawIndexed(DIA);
+        }
+    };
+
+    auto drawTriangle = [&](const NVGDECall& call, int image) {
+        prepareRendering(image);
+        DE::DrawAttribs DA = {};
+        DA.NumVertices = call.triangleCount;
+        DA.StartVertexLocation = call.vertOffset + call.triangleOffset;
+        immediateContext->Draw(DA);
+    };
 
     for(const auto& call : context->calls) {
         // setBlend
@@ -536,89 +625,108 @@ static void nvgde_renderFlush(void* uptr) {
             case Type::fill: {
                 // Draw shapes
                 depthStencil.StencilEnable = true;
-                depthStencil.StencilReadMask = depthStencil.StencilWriteMask =
-                    0xff;
-                stencilFront.StencilFunc = stencilBack.StencilFunc =
-                    DE::COMPARISON_FUNC_ALWAYS;
-                context->context->SetStencilRef(0);
+                setStencil(0, 0xff, DE::COMPARISON_FUNC_ALWAYS,
+                           DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP,
+                           DE::STENCIL_OP_KEEP);
                 blend.RenderTargetWriteMask = 0;
 
                 // set bindpoint for solid loc
                 bindUniform(context, call.uniform[0]);
 
-                stencilFront.StencilFailOp = stencilFront.StencilDepthFailOp =
-                    stencilBack.StencilFailOp = stencilBack.StencilDepthFailOp =
-                        DE::STENCIL_OP_KEEP;
                 stencilFront.StencilPassOp = DE::STENCIL_OP_INCR_WRAP;
                 stencilBack.StencilPassOp = DE::STENCIL_OP_DECR_WRAP;
                 rasterizer.CullMode = DE::CULL_MODE_NONE;
-                curState.GraphicsPipeline.PrimitiveTopology =
-                    DE::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+                primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
-                NVGDEPipelineState& pipeline = context->pipeline.get(curState);
-                immediateContext->SetPipelineState(pipeline.PSO);
-                bindImage(pipeline.SRB, context->texture.get(0));
+                for(const auto& path : call.path)
+                    prepareTriangleFansIndexBuffer(context, path.fillCount - 2);
 
-                immediateContext->CommitShaderResources(
-                    pipeline.SRB,
-                    DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-                for(const auto& path : call.path) {
-                    prepareTriangleFansIndexBuffer(path.fillCount - 2);
-                    immediateContext->SetIndexBuffer(
-                        context->triangleFansIndex);
-
-                    {
-                        DE::IBuffer* buf = mResource->inst;
-                        DE::Uint32 voff = 0;
-                        immediateContext->SetVertexBuffers(
-                            0, 1, &buf, &voff,
-                            DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
-                            DE::SET_VERTEX_BUFFERS_FLAG_RESET);
-                    }
-
-                    immediateContext->CommitShaderResources(
-                        pipeline.SRB,
-                        DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-                    glDrawArrays(GL_TRIANGLE_FAN, paths[i].fillOffset,
-                                 paths[i].fillCount);
-                    DE::DrawIndexedAttribs DIA = {};
-                    DIA.BaseVertex = ;
-                    DIA.FirstIndexLocation = ;
-                    DIA.Flags = ;
-                    DIA.IndexType = ;
-                    DIA.NumIndices = ;
-                    immediateContext->DrawIndexed(DIA);
-                }
+                drawFans(call, 0);
                 rasterizer.CullMode = DE::CULL_MODE_BACK;
 
                 // Draw anti-aliased pixels
                 blend.RenderTargetWriteMask = DE::COLOR_MASK_ALL;
-
                 bindUniform(context, call.uniform[1]);
-                bindTex(context, call.image);
 
                 if(context->MSAA == 1) {
-                    glnvg__stencilFunc(gl, GL_EQUAL, 0x00, 0xff);
-                    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+                    setStencil(0x00, 0xff, DE::COMPARISON_FUNC_EQUAL,
+                               DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP,
+                               DE::STENCIL_OP_KEEP);
+                    primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
                     // Draw fringes
-                    for(i = 0; i < npaths; i++)
-                        glDrawArrays(GL_TRIANGLE_STRIP, paths[i].strokeOffset,
-                                     paths[i].strokeCount);
+                    drawStroke(call, call.image);
                 }
 
                 // Draw fill
-                glnvg__stencilFunc(gl, GL_NOTEQUAL, 0x0, 0xff);
-                glStencilOp(GL_ZERO, GL_ZERO, GL_ZERO);
-                glDrawArrays(GL_TRIANGLE_STRIP, call->triangleOffset,
-                             call->triangleCount);
+                setStencil(0x00, 0xff, DE::COMPARISON_FUNC_NOT_EQUAL,
+                           DE::STENCIL_OP_ZERO, DE::STENCIL_OP_ZERO,
+                           DE::STENCIL_OP_ZERO);
+                primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+                drawTriangle(call, call.image);
 
                 depthStencil.StencilEnable = false;
             } break;
             case Type::convexFill: {
+                bindUniform(context, call.uniform[0]);
+                primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+                for(const auto& path : call.path)
+                    prepareTriangleFansIndexBuffer(context, path.fillCount - 2);
+
+                drawFans(call, call.image);
+
+                primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+
+                drawStroke(call, call.image);
             } break;
             case Type::stroke: {
+                if(context->flags & NVG_STENCIL_STROKES) {
+                    depthStencil.StencilEnable = true;
+
+                    // Fill the stroke base without overlap
+                    setStencil(0x00, 0xff, DE::COMPARISON_FUNC_EQUAL,
+                               DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP,
+                               DE::STENCIL_OP_INCR_SAT);
+
+                    bindUniform(context, call.uniform[1]);
+
+                    primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+
+                    drawStroke(call, call.image);
+
+                    // Draw anti-aliased pixels.
+                    bindUniform(context, call.uniform[0]);
+
+                    setStencil(0x00, 0xff, DE::COMPARISON_FUNC_EQUAL,
+                               DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP,
+                               DE::STENCIL_OP_KEEP);
+
+                    drawStroke(call, call.image);
+
+                    // Clear stencil buffer.
+                    blend.RenderTargetWriteMask = 0;
+
+                    setStencil(0x00, 0xff, DE::COMPARISON_FUNC_ALWAYS,
+                               DE::STENCIL_OP_ZERO, DE::STENCIL_OP_ZERO,
+                               DE::STENCIL_OP_ZERO);
+                    drawStroke(call, call.image);
+
+                    blend.RenderTargetWriteMask = DE::COLOR_MASK_ALL;
+
+                    depthStencil.StencilEnable = false;
+
+                    //		glnvg__convertPaint(gl, nvg__fragUniformPtr(gl,
+                    // call->uniformOffset + gl->fragSize), paint, scissor,
+                    // strokeWidth, fringe, 1.0f - 0.5f/255.0f);
+
+                } else {
+                    bindUniform(context, call.uniform[0]);
+                    // Draw Strokes
+                    drawStroke(call, call.image);
+                }
             } break;
             case Type::triangles: {
+                bindUniform(context, call.uniform[0]);
+                drawTriangle(call, call.image);
             } break;
             default:
                 break;
@@ -781,23 +889,25 @@ static void nvgde_renderFill(void* uptr, NVGpaint* paint,
     NVGDECall call = {};
 
     call.type = Type::fill;
-    int triangleCount = 4;
+    call.triangleCount = 4;
     call.image = paint->image;
     call.blendFunc = castBlendFunc(compositeOperation);
 
     if(npaths == 1 && paths[0].convex) {
         call.type = Type::convexFill;
-        triangleCount = 0;  // Bounding box fill quad not needed for convex fill
+        call.triangleCount =
+            0;  // Bounding box fill quad not needed for convex fill
     }
 
-    int maxVerts = maxVertCount(paths, npaths) + triangleCount;
+    int maxVerts = maxVertCount(paths, npaths) + call.triangleCount;
 
     call.vert.reserve(maxVerts);
     call.path.reserve(npaths);
 
+    int offset = 0;
+
     for(int i = 0; i < npaths; i++) {
         NVGDEPath dpath = {};
-        int offset = 0;
         const NVGpath* path = &paths[i];
         if(path->nfill > 0) {
             dpath.fillOffset = offset;
@@ -819,6 +929,7 @@ static void nvgde_renderFill(void* uptr, NVGpaint* paint,
     // Setup uniforms for draw calls
     if(call.type == Type::fill) {
         // Quad
+        call.triangleOffset = offset;
         call.vert.push_back(NVGvertex{ bounds[2], bounds[3], 0.5f, 1.0f });
         call.vert.push_back(NVGvertex{ bounds[2], bounds[1], 0.5f, 1.0f });
         call.vert.push_back(NVGvertex{ bounds[0], bounds[3], 0.5f, 1.0f });
@@ -851,7 +962,7 @@ static void nvgde_renderStroke(void* uptr, NVGpaint* paint,
 
     call.type = Type::stroke;
     call.image = paint->image;
-    call.blendFunc = blendCompositeOperation(compositeOperation);
+    call.blendFunc = castBlendFunc(compositeOperation);
 
     // Allocate vertices for all the paths.
     int maxverts = maxVertCount(paths, npaths);
@@ -896,15 +1007,17 @@ static void nvgde_renderTriangles(void* uptr, NVGpaint* paint,
 
     call.type = Type::triangles;
     call.image = paint->image;
-    call.blendFunc = blendCompositeOperation(compositeOperation);
+    call.blendFunc = castBlendFunc(compositeOperation);
 
     // Allocate vertices for all the paths.
     call.vert.assign(verts, verts + nverts);
+    call.triangleCount = nverts;
+    call.triangleOffset = 0;
 
     // Fill shader
     Uniform& frag = call.uniform[0];
     convertPaint(context, frag, paint, scissor, 1.0f, fringe, -1.0f);
-    frag->type = ShaderType::NSVG_SHADER_IMG;
+    frag.type = static_cast<int>(ShaderType::NSVG_SHADER_IMG);
 
     context->calls.push_back(call);
 }

@@ -17,15 +17,16 @@
 // 3. This notice may not be removed or altered from any source distribution.
 //
 
+// SHA=2bead03bea43b2418060aaa154f972829995e663
 
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 
-#include <Windows.h>
-#include <nanovg.h>
 #include "demo.h"
 #include "perf.h"
+#include <Windows.h>
+#include <nanovg.h>
 #include <nanovg_DE.hpp>
 
 #define ENGINE_DLL 1
@@ -34,32 +35,39 @@
 #define GL_SUPPORTED 1
 #define VULKAN_SUPPORTED 1
 
-#include "engine.hpp"
+#include <DiligentCore/Common/interface/FileWrapper.hpp>
 #include <DiligentCore/Graphics/GraphicsEngineD3D11/interface/EngineFactoryD3D11.h>
 #include <DiligentCore/Graphics/GraphicsEngineD3D12/interface/EngineFactoryD3D12.h>
 #include <DiligentCore/Graphics/GraphicsEngineOpenGL/interface/EngineFactoryOpenGL.h>
 #include <DiligentCore/Graphics/GraphicsEngineVulkan/interface/EngineFactoryVk.h>
+#include <DiligentCore/Graphics/GraphicsTools/interface/DurationQueryHelper.hpp>
+#include <DiligentCore/Graphics/GraphicsTools/interface/ScreenCapture.hpp>
+#include <DiligentTools/TextureLoader/interface/Image.h>
+#include <chrono>
+#include <sstream>
 
-class Engine final :private Unmovable {
+using Clock = std::chrono::high_resolution_clock;
+
+class Engine final {
 public:
-    Engine(void *hWnd, DE::RENDER_DEVICE_TYPE type) {
+    Engine(void* hWnd, DE::RENDER_DEVICE_TYPE type) {
         DE::SwapChainDesc SCDesc;
-        switch (type) {
+        switch(type) {
 #if D3D11_SUPPORTED
-            case DE::RENDER_DEVICE_TYPE_D3D11:
-            {
+            case DE::RENDER_DEVICE_TYPE_D3D11: {
                 DE::EngineD3D11CreateInfo EngineCI;
 #ifdef DILIGENT_DEBUG
-                EngineCI.DebugFlags |= DE::D3D11_DEBUG_FLAG_CREATE_DEBUG_DEVICE |
+                EngineCI.DebugFlags |=
+                    DE::D3D11_DEBUG_FLAG_CREATE_DEBUG_DEVICE |
                     DE::D3D11_DEBUG_FLAG_VERIFY_COMMITTED_SHADER_RESOURCES;
 #endif
 #if ENGINE_DLL
-            // Load the dll and import GetEngineFactoryD3D11() function
+                // Load the dll and import GetEngineFactoryD3D11() function
                 auto GetEngineFactoryD3D11 = DE::LoadGraphicsEngineD3D11();
 #endif
-                auto *pFactoryD3D11 = GetEngineFactoryD3D11();
+                auto* pFactoryD3D11 = GetEngineFactoryD3D11();
                 pFactoryD3D11->CreateDeviceAndContextsD3D11(EngineCI, &device,
-                    &immediateContext);
+                                                            &immediateContext);
                 DE::Win32NativeWindow window{ hWnd };
                 pFactoryD3D11->CreateSwapChainD3D11(
                     device, immediateContext, SCDesc, DE::FullScreenModeDesc{},
@@ -68,21 +76,19 @@ public:
 #endif
 
 #if D3D12_SUPPORTED
-            case DE::RENDER_DEVICE_TYPE_D3D12:
-            {
+            case DE::RENDER_DEVICE_TYPE_D3D12: {
 #if ENGINE_DLL
-            // Load the dll and import GetEngineFactoryD3D12() function
+                // Load the dll and import GetEngineFactoryD3D12() function
                 auto GetEngineFactoryD3D12 = DE::LoadGraphicsEngineD3D12();
 #endif
                 DE::EngineD3D12CreateInfo EngineCI;
 #ifdef DILIGENT_DEBUG
-            // There is a bug in D3D12 debug layer that causes memory leaks in
-            // this tutorial
-            // EngineCI.EnableDebugLayer = true;
+                // There is a bug in D3D12 debug layer that causes memory leaks
+                // in this tutorial EngineCI.EnableDebugLayer = true;
 #endif
-                auto *pFactoryD3D12 = GetEngineFactoryD3D12();
+                auto* pFactoryD3D12 = GetEngineFactoryD3D12();
                 pFactoryD3D12->CreateDeviceAndContextsD3D12(EngineCI, &device,
-                    &immediateContext);
+                                                            &immediateContext);
                 DE::Win32NativeWindow window{ hWnd };
                 pFactoryD3D12->CreateSwapChainD3D12(
                     device, immediateContext, SCDesc, DE::FullScreenModeDesc{},
@@ -91,14 +97,13 @@ public:
 #endif
 
 #if GL_SUPPORTED
-            case DE::RENDER_DEVICE_TYPE_GL:
-            {
+            case DE::RENDER_DEVICE_TYPE_GL: {
 
 #if EXPLICITLY_LOAD_ENGINE_GL_DLL
-            // Load the dll and import GetEngineFactoryOpenGL() function
+                // Load the dll and import GetEngineFactoryOpenGL() function
                 auto GetEngineFactoryOpenGL = DE::LoadGraphicsEngineOpenGL();
 #endif
-                auto *pFactoryOpenGL = GetEngineFactoryOpenGL();
+                auto* pFactoryOpenGL = GetEngineFactoryOpenGL();
 
                 DE::EngineGLCreateInfo EngineCI;
                 EngineCI.Window.hWnd = hWnd;
@@ -111,24 +116,23 @@ public:
 #endif
 
 #if VULKAN_SUPPORTED
-            case DE::RENDER_DEVICE_TYPE_VULKAN:
-            {
+            case DE::RENDER_DEVICE_TYPE_VULKAN: {
 #if EXPLICITLY_LOAD_ENGINE_VK_DLL
-            // Load the dll and import GetEngineFactoryVk() function
+                // Load the dll and import GetEngineFactoryVk() function
                 auto GetEngineFactoryVk = DE::LoadGraphicsEngineVk();
 #endif
                 DE::EngineVkCreateInfo EngineCI;
 #ifdef DILIGENT_DEBUG
                 EngineCI.EnableValidation = true;
 #endif
-                auto *pFactoryVk = GetEngineFactoryVk();
+                auto* pFactoryVk = GetEngineFactoryVk();
                 pFactoryVk->CreateDeviceAndContextsVk(EngineCI, &device,
-                    &immediateContext);
+                                                      &immediateContext);
 
-                if (!swapChain && hWnd != nullptr) {
+                if(!swapChain && hWnd != nullptr) {
                     DE::Win32NativeWindow window{ hWnd };
-                    pFactoryVk->CreateSwapChainVk(device, immediateContext, SCDesc,
-                        window, &swapChain);
+                    pFactoryVk->CreateSwapChainVk(device, immediateContext,
+                                                  SCDesc, window, &swapChain);
                 }
             } break;
 #endif
@@ -143,89 +147,233 @@ public:
         immediateContext->Flush();
     }
 
-    void updateTarget() {
-        auto *pRTV = swapChain->GetCurrentBackBufferRTV();
-        auto *pDSV = swapChain->GetDepthBufferDSV();
+    void updateTarget(const float* clearColor) {
+        auto* pRTV = swapChain->GetCurrentBackBufferRTV();
+        auto* pDSV = swapChain->GetDepthBufferDSV();
         immediateContext->SetRenderTargets(
             1, &pRTV, pDSV, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
 
         // Clear the back buffer
-        const float ClearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
         // Let the engine perform required state transitions
         immediateContext->ClearRenderTarget(
-            pRTV, ClearColor, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+            pRTV, clearColor, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
         immediateContext->ClearDepthStencil(
-            pDSV, DE::CLEAR_DEPTH_FLAG, 1.f, 0,
+            pDSV, DE::CLEAR_DEPTH_FLAG | DE::CLEAR_STENCIL_FLAG, 1.f, 0,
             DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     }
 
-    DE::RefCntAutoPtr<DE::IRenderDevice>  device;
+    DE::RefCntAutoPtr<DE::IRenderDevice> device;
     DE::RefCntAutoPtr<DE::IDeviceContext> immediateContext;
-    DE::RefCntAutoPtr<DE::ISwapChain>     swapChain;
+    DE::RefCntAutoPtr<DE::ISwapChain> swapChain;
 };
 
 std::unique_ptr<Engine> gEngine;
+bool blowup = false, screenshot = false, premult = false, escape = false;
+
+void SaveScreenCapture(const std::string& FileName,
+                       DE::ScreenCapture::CaptureInfo& Capture) {
+    DE::MappedTextureSubresource texData;
+    gEngine->immediateContext->MapTextureSubresource(
+        Capture.pTexture, 0, 0, DE::MAP_READ, DE::MAP_FLAG_DO_NOT_WAIT, nullptr,
+        texData);
+    const auto& texDesc = Capture.pTexture->GetDesc();
+
+    DE::Image::EncodeInfo Info;
+    Info.Width = texDesc.Width;
+    Info.Height = texDesc.Height;
+    Info.TexFormat = texDesc.Format;
+    Info.KeepAlpha = !premult;
+    Info.pData = texData.pData;
+    Info.Stride = texData.Stride;
+    Info.FileFormat = DE::IMAGE_FILE_FORMAT_PNG;
+
+    DE::RefCntAutoPtr<DE::IDataBlob> pEncodedImage;
+    DE::Image::Encode(Info, &pEncodedImage);
+    gEngine->immediateContext->UnmapTextureSubresource(Capture.pTexture, 0, 0);
+
+    DE::FileWrapper pFile(FileName.c_str(), EFileAccessMode::Overwrite);
+    if(pFile) {
+        auto res =
+            pFile->Write(pEncodedImage->GetDataPtr(), pEncodedImage->GetSize());
+        pFile.Close();
+    }
+}
+
+void saveScreenShot() {
+    gEngine->immediateContext->SetRenderTargets(
+        0, nullptr, nullptr, DE::RESOURCE_STATE_TRANSITION_MODE_NONE);
+    DE::ScreenCapture sc(gEngine->device);
+    sc.Capture(gEngine->swapChain, gEngine->immediateContext, 0);
+    auto cap = sc.GetCapture();
+    SaveScreenCapture("dump.png", cap);
+}
+
+std::unique_ptr<DE::DurationQueryHelper> query;
+
+void initGPUTimer(GPUtimer* timer) {
+    memset(timer, 0, sizeof(GPUtimer));
+    timer->supported =
+        gEngine->device->GetDeviceCaps().Features.TimestampQueries;
+    if(timer->supported)
+        query = std::make_unique<DE::DurationQueryHelper>(gEngine->device, 100);
+}
+void startGPUTimer(GPUtimer* timer) {
+    if(!timer->supported)
+        return;
+    query->Begin(gEngine->immediateContext);
+}
+bool stopGPUTimer(GPUtimer* timer, float* time) {
+    if(!timer->supported)
+        return 0;
+    double res;
+    if(query->End(gEngine->immediateContext, res)) {
+        *time = static_cast<float>(res);
+        return true;
+    }
+    return false;
+}
+
+LRESULT CALLBACK MessageProc(HWND wnd, UINT message, WPARAM wParam,
+                             LPARAM lParam);
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
     WNDCLASSEX wcex = { sizeof(WNDCLASSEX),
-        CS_HREDRAW | CS_VREDRAW,
-        MessageProc,
-        0L,
-        0L,
-        instance,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        L"NanoVG",
-        NULL };
+                        CS_HREDRAW | CS_VREDRAW,
+                        MessageProc,
+                        0L,
+                        0L,
+                        instance,
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL,
+                        L"NanoVG",
+                        NULL };
     RegisterClassExW(&wcex);
 
     RECT rc = { 0, 0, 1000, 600 };
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
     HWND hwnd = CreateWindowW(L"NanoVG", L"NanoVG", WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left,
-        rc.bottom - rc.top, NULL, NULL, instance, NULL);
-    if (!hwnd) {
+                              CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left,
+                              rc.bottom - rc.top, NULL, NULL, instance, NULL);
+    if(!hwnd) {
         return -1;
     }
     ShowWindow(hwnd, cmdShow);
     UpdateWindow(hwnd);
 
-    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_VULKAN);
+    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_D3D12);
 
     DemoData data;
-    NVGcontext *vg = NULL;
+    NVGcontext* vg = NULL;
     GPUtimer gpuTimer;
     PerfGraph fps, cpuGraph, gpuGraph;
-    double prevt = 0, cpuTime = 0;
+    float cpuTime = 0;
     initGraph(&fps, GRAPH_RENDER_FPS, "Frame Time");
     initGraph(&cpuGraph, GRAPH_RENDER_MS, "CPU Time");
     initGraph(&gpuGraph, GRAPH_RENDER_MS, "GPU Time");
 
-    auto &&SDesc = gEngine->swapChain->GetDesc();
+    auto&& SDesc = gEngine->swapChain->GetDesc();
 
-    vg = nvgCreateDE(gEngine->device, gEngine->immediateContext, 1, SDesc.ColorBufferFormat, SDesc.DepthBufferFormat,
-        static_cast<int> (NVGCreateFlags::NVG_STENCIL_STROKES)
-    );
+    vg = nvgCreateDE(gEngine->device, gEngine->immediateContext, 1,
+                     SDesc.ColorBufferFormat, SDesc.DepthBufferFormat,
+                     static_cast<int>(NVGCreateFlags::NVG_STENCIL_STROKES));
 
-    if (loadDemoData(vg, &data) == -1)
+    if(loadDemoData(vg, &data) == -1)
         return -1;
 
     initGPUTimer(&gpuTimer);
 
+    auto lastTime = Clock::now();
+    float sum = 0.0f;
+
     MSG msg = { 0 };
-    while (WM_QUIT != msg.message) {
-        if (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+    while(WM_QUIT != msg.message && !escape) {
+        if(PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
-        }
-        else {
-            gEngine->updateTarget();
+        } else {
+
+            auto cur = Clock::now();
+            constexpr auto den = Clock::period::den;
+            float delta = static_cast<float>((cur - lastTime).count()) / den;
+            sum += delta;
+            lastTime = cur;
+
+            int winWidth, winHeight, mx, my, fbWidth, fbHeight;
+            {
+                RECT rect;
+                GetClientRect(hwnd, &rect);
+                winWidth = rect.right - rect.left;
+                winHeight = rect.bottom - rect.top;
+            }
+            {
+                POINT point;
+                GetCursorPos(&point);
+                ScreenToClient(hwnd, &point);
+                mx = point.x;
+                my = point.y;
+            }
+            {
+                auto&& SDesc = gEngine->swapChain->GetDesc();
+                fbWidth = SDesc.Width;
+                fbHeight = SDesc.Height;
+            }
+
+            float pxRatio = static_cast<float>(fbWidth) / winWidth;
+
+            startGPUTimer(&gpuTimer);
+
+            const float clearA[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+            const float clearB[] = { 0.3f, 0.3f, 0.32f, 1.0f };
+            gEngine->updateTarget(premult ? clearA : clearB);
+
+            nvgBeginFrame(vg, static_cast<float>(winWidth),
+                          static_cast<float>(winHeight), pxRatio);
+
+            renderDemo(vg, static_cast<float>(mx), static_cast<float>(my),
+                       static_cast<float>(winWidth),
+                       static_cast<float>(winHeight), sum, blowup, &data);
+            renderGraph(vg, 5, 5, &fps);
+            renderGraph(vg, 5 + 200 + 5, 5, &cpuGraph);
+            if(gpuTimer.supported)
+                renderGraph(vg, 5 + 200 + 5 + 200 + 5, 5, &gpuGraph);
+
+            nvgEndFrame(vg);
+
+            auto ct = Clock::now();
+            cpuTime = static_cast<float>((ct - cur).count()) / den;
+
+            updateGraph(&fps, delta);
+            updateGraph(&cpuGraph, cpuTime);
+
+            float gpuTime;
+            if(stopGPUTimer(&gpuTimer, &gpuTime))
+                updateGraph(&gpuGraph, gpuTime);
+
+            if(screenshot) {
+                screenshot = false;
+                saveScreenShot();
+            }
 
             // TODO:MSAA
             gEngine->swapChain->Present(0U);
         }
+    }
+
+    freeDemoData(vg, &data);
+    nvgDeleteDE(vg);
+
+    {
+        std::stringstream ss;
+        ss.precision(2);
+        ss << "Average Frame Time: " << (getGraphAverage(&fps) * 1000.0f)
+           << " ms\n";
+        ss << "          CPU Time: " << (getGraphAverage(&cpuGraph) * 1000.0f)
+           << " ms\n";
+        ss << "          GPU Time: " << (getGraphAverage(&cpuGraph) * 1000.0f)
+           << " ms\n";
+        MessageBoxA(hwnd, "exit", ss.str().c_str(), MB_OK);
     }
 
     gEngine.reset();
@@ -235,22 +383,38 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
 }
 
 LRESULT CALLBACK MessageProc(HWND wnd, UINT message, WPARAM wParam,
-    LPARAM lParam) {
-    switch (message) {
-        case WM_PAINT:
-        {
+                             LPARAM lParam) {
+    switch(message) {
+        case WM_KEYDOWN: {
+            if(wParam == VK_ESCAPE)
+                escape = true;
+            if(wParam == VK_SPACE) {
+                blowup = !blowup;
+                return true;
+            }
+            if(wParam == 'S') {
+                screenshot = 1;
+                return true;
+            }
+            if(wParam == 'P') {
+                premult = !premult;
+                return true;
+            }
+            return false;
+        }
+        case WM_PAINT: {
             PAINTSTRUCT ps;
             BeginPaint(wnd, &ps);
             EndPaint(wnd, &ps);
             return 0;
         }
         case WM_SIZE:
-            if (gEngine)
+            if(gEngine)
                 gEngine->swapChain->Resize(LOWORD(lParam), HIWORD(lParam));
             return 0;
 
         case WM_CHAR:
-            if (wParam == VK_ESCAPE)
+            if(wParam == VK_ESCAPE)
                 PostQuitMessage(0);
             return 0;
 
@@ -258,9 +422,8 @@ LRESULT CALLBACK MessageProc(HWND wnd, UINT message, WPARAM wParam,
             PostQuitMessage(0);
             return 0;
 
-        case WM_GETMINMAXINFO:
-        {
-            LPMINMAXINFO lpMMI = (LPMINMAXINFO) lParam;
+        case WM_GETMINMAXINFO: {
+            LPMINMAXINFO lpMMI = (LPMINMAXINFO)lParam;
 
             lpMMI->ptMinTrackSize.x = 320;
             lpMMI->ptMinTrackSize.y = 240;

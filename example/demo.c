@@ -2,10 +2,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#ifdef NANOVG_GL
 #ifdef NANOVG_GLEW
 #  include <GL/glew.h>
 #endif
 #include <GLFW/glfw3.h>
+#endif
 #include "nanovg.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -1212,6 +1214,7 @@ static void flipHorizontal(unsigned char* image, int w, int h, int stride)
 	}
 }
 
+#ifdef NANOVG_GL
 void saveScreenShot(int w, int h, int premult, const char* name)
 {
 	unsigned char* image = (unsigned char*)malloc(w*h*4);
@@ -1226,3 +1229,4 @@ void saveScreenShot(int w, int h, int premult, const char* name)
  	stbi_write_png(name, w, h, 4, image, w*4);
  	free(image);
 }
+#endif

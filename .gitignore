@@ -28,6 +28,7 @@ build/*
 *xcuserdata*
 
 .vs
+x64
 src/x64
 example/x64
 *.user

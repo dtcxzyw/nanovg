@@ -2,10 +2,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#ifdef NANOVG_GL
 #ifdef NANOVG_GLEW
 #  include <GL/glew.h>
 #endif
 #include <GLFW/glfw3.h>
+#endif // !NANOVG_GL
 #include "nanovg.h"
 
 #ifdef _MSC_VER
@@ -21,8 +23,8 @@
 //pfnGLGETQUERYOBJECTUI64V glGetQueryObjectui64v = 0;
 #endif
 
-void initGPUTimer(GPUtimer* timer)
-{
+#ifdef NANOVG_GL
+void initGPUTimer(GPUtimer *timer) {
 	memset(timer, 0, sizeof(*timer));
 
 /*	timer->supported = glfwExtensionSupported("GL_ARB_timer_query");
@@ -38,7 +40,6 @@ void initGPUTimer(GPUtimer* timer)
 		glGenQueries(GPU_QUERY_COUNT, timer->queries);
 	}*/
 }
-
 void startGPUTimer(GPUtimer* timer)
 {
 	if (!timer->supported)
@@ -73,6 +74,7 @@ int stopGPUTimer(GPUtimer* timer, float* times, int maxTimes)
 	return n;
 }
 
+#endif // NANOVG_GL
 
 void initGraph(PerfGraph* fps, int style, const char* name)
 {

@@ -204,9 +204,9 @@ struct PSInput {
     float4 arg:ARG;//pos texCoord
 };
 
-void VS(in float4 vin,out PSInput vout) {
+void VS(in float4 vin : ATTRIB0,out PSInput vout) {
     vout.arg=vin;
-    vout.pos = float4(2.0f*arg.x/viewSize.x - 1.0f, 1.0f - 2.0f*arg.y/viewSize.y, 0.0f, 1.0f);
+    vout.pos = float4(2.0f*vin.x/viewSize.x - 1.0f, 1.0f - 2.0f*vin.y/viewSize.y, 0.0f, 1.0f);
 }
 )";
 
@@ -217,11 +217,11 @@ cbuffer PSConstants {
     float4 frag[11];
 };
 struct PSInput {
-    float4 pos:SV_POSITION;
-    float4 arg:ARG;//pos texCoord
+    float4 pos : SV_POSITION;
+    float4 arg : ARG;  // pos texCoord
 };
-#define scissorMat mat3(frag[0].xyz, frag[1].xyz, frag[2].xyz)
-#define paintMat mat3(frag[3].xyz, frag[4].xyz, frag[5].xyz)
+#define scissorMat float3x3(frag[0].xyz, frag[1].xyz, frag[2].xyz)
+#define paintMat float3x3(frag[3].xyz, frag[4].xyz, frag[5].xyz)
 #define innerCol frag[6]
 #define outerCol frag[7]
 #define scissorExt frag[8].xy
@@ -234,58 +234,68 @@ struct PSInput {
 #define texType int(frag[10].z)
 #define type int(frag[10].w)
 float sdroundrect(float2 pt, float2 ext, float rad) {
-    float2 ext2 = ext - float2(rad,rad);
+    float2 ext2 = ext - float2(rad, rad);
     float2 d = abs(pt) - ext2;
-    return min(max(d.x,d.y),0.0f) + length(max(d,0.0f)) - rad;
+    return min(max(d.x, d.y), 0.0f) + length(max(d, 0.0f)) - rad;
 }
 // Scissoring
 float scissorMask(float2 p) {
-    float2 sc = (abs((scissorMat * float3(p,1.0f)).xy) - scissorExt);
-    sc = float2(0.5f,0.5f) - sc * scissorScale;
-    return clamp(sc.x,0.0f,1.0f) * clamp(sc.y,0.0f,1.0f);
+    float2 sc = (abs(mul(scissorMat, float3(p, 1.0f)).xy) - scissorExt);
+    sc = float2(0.5f, 0.5f) - sc * scissorScale;
+    return clamp(sc.x, 0.0f, 1.0f) * clamp(sc.y, 0.0f, 1.0f);
 }
 #ifdef EDGE_AA
 // Stroke - from [0..1] to clipped pyramid, where the slope is 1px.
-float strokeMask() {
-    return min(1.0f, (1.0f-abs(ftcoord.x*2.0f-1.0f))*strokeMult) * min(1.0f, ftcoord.y);
+float strokeMask(float2 ftcoord) {
+    return min(1.0f, (1.0f - abs(ftcoord.x * 2.0f - 1.0f)) * strokeMult) *
+        min(1.0f, ftcoord.y);
 }
 #endif
-void PS(in PSInput pin,out float4 result:SV_TARGET) {
-    float2 fpos=pin.arg.xy;
-    float2 ftcoord=pin.arg.zw;
+float4 mix(float4 a, float4 b, float d) {
+    return a * (1.0f - d) + b * d;
+}
+void PS(in PSInput pin, out float4 result : SV_TARGET) {
+    float2 fpos = pin.arg.xy;
+    float2 ftcoord = pin.arg.zw;
     float scissor = scissorMask(fpos);
-    #ifdef EDGE_AA
-    float strokeAlpha = strokeMask();
-    if (strokeAlpha < strokeThr) discard;
-    #else
+#ifdef EDGE_AA
+    float strokeAlpha = strokeMask(ftcoord);
+    if(strokeAlpha < strokeThr)
+        discard;
+#else
     float strokeAlpha = 1.0f;
-    #endif
-    if (type == 0) {			// Gradient
+#endif
+    if(type == 0) {  // Gradient
         // Calculate gradient color using box gradient
-        float2 pt = (paintMat * float3(fpos,1.0f)).xy;
-        float d = clamp((sdroundrect(pt, extent, radius) + 
-        feather*0.5f) / feather, 0.0f, 1.0f);
-        float4 color = mix(innerCol,outerCol,d);
+        float2 pt = mul(paintMat, float3(fpos, 1.0f)).xy;
+        float d =
+            clamp((sdroundrect(pt, extent, radius) + feather * 0.5f) / feather,
+                  0.0f, 1.0f);
+        float4 color = mix(innerCol, outerCol, d);
         // Combine alpha
         color *= strokeAlpha * scissor;
         result = color;
-    } else if (type == 1) {		// Image
+    } else if(type == 1) {  // Image
         // Calculate color fron texture
-        float2 pt = (paintMat * float3(fpos,1.0f)).xy / extent;
-        float4 color = gTexture.Sample(gTextureSampler, fptcoord);
-        if (texType == 1) color = float4(color.xyz*color.w,color.w);
-        else if(texType == 2)color = float4(color.x);
+        float2 pt = mul(paintMat , float3(fpos, 1.0f)).xy / extent;
+        float4 color = gTexture.Sample(gTextureSampler, ftcoord);
+        if(texType == 1)
+            color = float4(color.xyz * color.w, color.w);
+        else if(texType == 2)
+            color = color.xxxx;
         // Apply color tint and alpha.
         color *= innerCol;
         // Combine alpha
         color *= strokeAlpha * scissor;
         result = color;
-    } else if (type == 2) {		// Stencil fill
-        result = float4(1,1,1,1);
-    } else {		// Textured tris
-        float4 color = gTexture.Sample(gTextureSampler, fptcoord);
-        if (texType == 1) color = float4(color.xyz*color.w,color.w);
-        else if(texType == 2) color = float4(color.x);
+    } else if(type == 2) {  // Stencil fill
+        result = float4(1, 1, 1, 1);
+    } else {  // Textured tris
+        float4 color = gTexture.Sample(gTextureSampler, ftcoord);
+        if(texType == 1)
+            color = float4(color.xyz * color.w, color.w);
+        else if(texType == 2)
+            color = color.xxxx;
         color *= scissor;
         result = color * innerCol;
     }
@@ -305,7 +315,7 @@ static int nvgde_renderCreate(void* uptr) {
     PSODesc.GraphicsPipeline.DSVFormat = context->depthFormat;
 
     PSODesc.GraphicsPipeline.PrimitiveTopology =
-        DE::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        DE::PRIMITIVE_TOPOLOGY_UNDEFINED;
     PSODesc.GraphicsPipeline.RasterizerDesc.CullMode = DE::CULL_MODE_BACK;
     PSODesc.GraphicsPipeline.RasterizerDesc.FrontCounterClockwise = true;
 
@@ -327,13 +337,12 @@ static int nvgde_renderCreate(void* uptr) {
     shaderCI.UseCombinedTextureSamplers = true;
     shaderCI.CombinedSamplerSuffix = "Sampler";
 
-    DE::RefCntAutoPtr<DE::IShader> pVS;
     {
         shaderCI.Desc.ShaderType = DE::SHADER_TYPE_VERTEX;
         shaderCI.EntryPoint = "VS";
         shaderCI.Desc.Name = "NanoVG VS";
         shaderCI.Source = vertShader;
-        context->device->CreateShader(shaderCI, &pVS);
+        context->device->CreateShader(shaderCI, &(context->pVS));
     }
 
     DE::RefCntAutoPtr<DE::IShader> pPS;
@@ -347,17 +356,20 @@ static int nvgde_renderCreate(void* uptr) {
             macros.AddShaderMacro("EDGE_AA", true);
             shaderCI.Macros = macros;
         }
-        context->device->CreateShader(shaderCI, &pPS);
+        context->device->CreateShader(shaderCI, &(context->pPS));
     }
 
-    PSODesc.GraphicsPipeline.SmplDesc.Count = context->MSAA;
-    PSODesc.GraphicsPipeline.pVS = pVS;
-    PSODesc.GraphicsPipeline.pPS = pPS;
+    // PSODesc.GraphicsPipeline.SmplDesc.Count = context->MSAA;
+    // TODO:MSAA
+
+    PSODesc.GraphicsPipeline.pVS = context->pVS;
+    PSODesc.GraphicsPipeline.pPS = context->pPS;
     static DE::LayoutElement layout[] = {
         DE::LayoutElement{ 0, 0, 4, DE::VT_FLOAT32, false },
     };
     PSODesc.GraphicsPipeline.InputLayout.LayoutElements = layout;
-    PSODesc.GraphicsPipeline.InputLayout.NumElements = std::size(layout);
+    PSODesc.GraphicsPipeline.InputLayout.NumElements =
+        static_cast<DE::Uint32>(std::size(layout));
 
     DE::CreateUniformBuffer(context->device, sizeof(float) * 2,
                             "NanoVG Constant viewSize",
@@ -365,18 +377,28 @@ static int nvgde_renderCreate(void* uptr) {
     DE::CreateUniformBuffer(context->device, sizeof(float) * 44,
                             "NanoVG Constant frag", &(context->uniform));
 
+    static DE::ShaderResourceVariableDesc VDesc[] = {
+        DE::ShaderResourceVariableDesc{
+            DE::SHADER_TYPE_PIXEL, "gTexture",
+            DE::SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC },
+    };
+
+    PSODesc.ResourceLayout.NumVariables =
+        static_cast<DE::Uint32>(std::size(VDesc));
+    PSODesc.ResourceLayout.Variables = VDesc;
+
     context->pipeline.setGenerator(
         [context](const DE::PipelineStateDesc& PSODesc) {
             DE::PipelineStateCreateInfo PSOCI;
             PSOCI.PSODesc = PSODesc;
-            // TODO:ResourceLayout StaticSampler
-            throw;
+
             NVGDEPipelineState pipeline;
             context->device->CreatePipelineState(PSOCI, &pipeline.PSO);
             pipeline.PSO
-                ->GetStaticVariableByName(DE::SHADER_TYPE_VERTEX, "viewSize")
+                ->GetStaticVariableByName(DE::SHADER_TYPE_VERTEX, "VSConstants")
                 ->Set(context->viewConstant);
-            pipeline.PSO->GetStaticVariableByName(DE::SHADER_TYPE_PIXEL, "frag")
+            pipeline.PSO
+                ->GetStaticVariableByName(DE::SHADER_TYPE_PIXEL, "PSConstants")
                 ->Set(context->uniform);
             pipeline.PSO->CreateShaderResourceBinding(&pipeline.SRB, true);
             return pipeline;
@@ -395,8 +417,8 @@ static int nvgde_renderCreateTexture(void* uptr, int type, int w, int h,
     DE::TextureDesc desc = {};
     desc.BindFlags = DE::BIND_SHADER_RESOURCE;
     desc.CPUAccessFlags = DE::CPU_ACCESS_NONE;  // DE::CPU_ACCESS_WRITE
-    desc.Format = (type == NVG_TEXTURE_RGBA ? DE::TEX_FORMAT_RGBA8_SINT :
-                                              DE::TEX_FORMAT_R8_SINT);
+    desc.Format = (type == NVG_TEXTURE_RGBA ? DE::TEX_FORMAT_RGBA8_UINT :
+                                              DE::TEX_FORMAT_R8_UINT);
     desc.Width = w;
     desc.Height = h;
     desc.MipLevels = 1;
@@ -417,7 +439,7 @@ static int nvgde_renderCreateTexture(void* uptr, int type, int w, int h,
     tdata.pSubResources = &sdata;
 
     NVGDETexture tex;
-    context->device->CreateTexture(desc, &tdata, &tex.tex);
+    context->device->CreateTexture(desc, data ? &tdata : nullptr, &tex.tex);
 
     tex.texView = tex.tex->GetDefaultView(DE::TEXTURE_VIEW_SHADER_RESOURCE);
     tex.texView->SetSampler(context->sampler.get(imageFlags));
@@ -461,7 +483,7 @@ static int nvgde_renderGetTextureSize(void* uptr, int image, int* w, int* h) {
 static void nvgde_renderViewport(void* uptr, float width, float height,
                                  float devicePixelRatio) {
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
-    DE::MapHelper<float> guard(context->context, context->uniform,
+    DE::MapHelper<float> guard(context->context, context->viewConstant,
                                DE::MAP_WRITE, DE::MAP_FLAG_DISCARD);
     auto ptr = static_cast<float*>(guard);
     ptr[0] = width;
@@ -477,8 +499,7 @@ static void bindUniform(NVGDEContext* context, const Uniform& uni) {
     *guard = uni;
 }
 static void bindTex(DE::IShaderResourceBinding* SRB, NVGDETexture& tex) {
-    SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gTextureSampler")
-        ->Set(tex.texView);
+    SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gTexture")->Set(tex.texView);
 }
 static void prepareTriangleFansIndexBuffer(NVGDEContext* context, int siz) {
     if(siz <= context->indexSize)
@@ -532,7 +553,7 @@ static void nvgde_renderFlush(void* uptr) {
 
     DE::RefCntAutoPtr<DE::IBuffer> vertBuffer;
     {
-        size_t siz = 0;
+        int siz = 0;
         for(auto& call : context->calls) {
             call.vertOffset = siz;
             siz += static_cast<int>(call.vert.size());
@@ -1023,7 +1044,7 @@ static void nvgde_renderTriangles(void* uptr, NVGpaint* paint,
 }
 static void nvgde_renderDelete(void* uptr) {
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
-    delete reinterpret_cast<NVGDEContext*>(context);
+    delete context;
 }
 static auto generateSampler(DE::IRenderDevice* device, int imageFlags) {
     DE::SamplerDesc sd = {};

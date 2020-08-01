@@ -1,6 +1,6 @@
 //
 // Copyright (c) 2009-2013 Mikko Mononen memon@inside.org
-// Port of _gl.h to _DE.hpp by dtcxzyw
+// Port of _gl.h to _DE.cpp by dtcxzyw
 //
 // This software is provided 'as-is', without any express or implied
 // warranty.  In no event will the authors be held liable for any damages

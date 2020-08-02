@@ -48,14 +48,30 @@
 
 using Clock = std::chrono::high_resolution_clock;
 
+#ifdef _DEBUG
+#define DILIGENT_DEBUG
+#endif  // _DEBUG
+
+static void callback(DE::DEBUG_MESSAGE_SEVERITY severity, const char* message,
+                     const char* function, const char* file, int line) {
+    if(severity != DE::DEBUG_MESSAGE_SEVERITY_INFO) {
+        DebugBreak();
+    } else
+        OutputDebugStringA(message);
+}
+
 class Engine final {
 public:
     Engine(void* hWnd, DE::RENDER_DEVICE_TYPE type) {
         DE::SwapChainDesc SCDesc;
+        SCDesc.DefaultDepthValue = 1.0f;
+        SCDesc.DefaultStencilValue = 0;
+
         switch(type) {
 #if D3D11_SUPPORTED
             case DE::RENDER_DEVICE_TYPE_D3D11: {
                 DE::EngineD3D11CreateInfo EngineCI;
+                EngineCI.DebugMessageCallback = callback;
 #ifdef DILIGENT_DEBUG
                 EngineCI.DebugFlags |=
                     DE::D3D11_DEBUG_FLAG_CREATE_DEBUG_DEVICE |
@@ -82,6 +98,7 @@ public:
                 auto GetEngineFactoryD3D12 = DE::LoadGraphicsEngineD3D12();
 #endif
                 DE::EngineD3D12CreateInfo EngineCI;
+                EngineCI.DebugMessageCallback = callback;
 #ifdef DILIGENT_DEBUG
                 // There is a bug in D3D12 debug layer that causes memory leaks
                 // in this tutorial EngineCI.EnableDebugLayer = true;
@@ -107,6 +124,7 @@ public:
 
                 DE::EngineGLCreateInfo EngineCI;
                 EngineCI.Window.hWnd = hWnd;
+                EngineCI.DebugMessageCallback = callback;
 #ifdef DILIGENT_DEBUG
                 EngineCI.CreateDebugContext = true;
 #endif
@@ -122,6 +140,7 @@ public:
                 auto GetEngineFactoryVk = DE::LoadGraphicsEngineVk();
 #endif
                 DE::EngineVkCreateInfo EngineCI;
+                EngineCI.DebugMessageCallback = callback;
 #ifdef DILIGENT_DEBUG
                 EngineCI.EnableValidation = true;
 #endif
@@ -158,7 +177,7 @@ public:
         immediateContext->ClearRenderTarget(
             pRTV, clearColor, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
         immediateContext->ClearDepthStencil(
-            pDSV, DE::CLEAR_DEPTH_FLAG | DE::CLEAR_STENCIL_FLAG, 1.f, 0,
+            pDSV, DE::CLEAR_DEPTH_FLAG | DE::CLEAR_STENCIL_FLAG, 1.0f, 0,
             DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     }
 
@@ -262,7 +281,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
     ShowWindow(hwnd, cmdShow);
     UpdateWindow(hwnd);
 
-    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_D3D12);
+    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_GL);
 
     DemoData data;
     NVGcontext* vg = NULL;
@@ -277,7 +296,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
 
     vg = nvgCreateDE(gEngine->device, gEngine->immediateContext, 1,
                      SDesc.ColorBufferFormat, SDesc.DepthBufferFormat,
-                     static_cast<int>(NVGCreateFlags::NVG_STENCIL_STROKES));
+                     static_cast<int>(NVGCreateFlags::NVG_STENCIL_STROKES |
+                                      NVGCreateFlags::NVG_DEBUG));
 
     if(loadDemoData(vg, &data) == -1)
         return -1;
@@ -330,15 +350,14 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
 
             nvgBeginFrame(vg, static_cast<float>(winWidth),
                           static_cast<float>(winHeight), pxRatio);
-
             renderDemo(vg, static_cast<float>(mx), static_cast<float>(my),
                        static_cast<float>(winWidth),
                        static_cast<float>(winHeight), sum, blowup, &data);
+
             renderGraph(vg, 5, 5, &fps);
             renderGraph(vg, 5 + 200 + 5, 5, &cpuGraph);
             if(gpuTimer.supported)
                 renderGraph(vg, 5 + 200 + 5 + 200 + 5, 5, &gpuGraph);
-
             nvgEndFrame(vg);
 
             auto ct = Clock::now();

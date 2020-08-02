@@ -31,4 +31,5 @@ build/*
 x64
 src/x64
 example/x64
+example/reference/x64
 *.user

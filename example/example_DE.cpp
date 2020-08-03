@@ -52,6 +52,8 @@ using Clock = std::chrono::high_resolution_clock;
 #define DILIGENT_DEBUG
 #endif  // _DEBUG
 
+#define NANOVG_MSAA
+
 static void callback(DE::DEBUG_MESSAGE_SEVERITY severity, const char* message,
                      const char* function, const char* file, int line) {
     if(severity != DE::DEBUG_MESSAGE_SEVERITY_INFO) {
@@ -66,6 +68,7 @@ public:
         DE::SwapChainDesc SCDesc;
         SCDesc.DefaultDepthValue = 1.0f;
         SCDesc.DefaultStencilValue = 0;
+        SCDesc.ColorBufferFormat = DE::TEX_FORMAT_RGBA8_UNORM;
         SCDesc.DepthBufferFormat = DE::TEX_FORMAT_D24_UNORM_S8_UINT;
         SCDesc.Usage = DE::SWAP_CHAIN_USAGE_RENDER_TARGET |
             DE::SWAP_CHAIN_USAGE_COPY_SOURCE;
@@ -103,8 +106,7 @@ public:
                 DE::EngineD3D12CreateInfo EngineCI;
                 EngineCI.DebugMessageCallback = callback;
 #ifdef DILIGENT_DEBUG
-                // There is a bug in D3D12 debug layer that causes memory leaks
-                // in this tutorial EngineCI.EnableDebugLayer = true;
+                EngineCI.EnableDebugLayer = true;
 #endif
                 auto* pFactoryD3D12 = GetEngineFactoryD3D12();
                 pFactoryD3D12->CreateDeviceAndContextsD3D12(EngineCI, &device,
@@ -172,6 +174,11 @@ public:
     void updateTarget(const float* clearColor) {
         auto* pRTV = swapChain->GetCurrentBackBufferRTV();
         auto* pDSV = swapChain->GetDepthBufferDSV();
+        if(sampleCount) {
+            pRTV = msaaColorRTV;
+            pDSV = msaaDepthDSV;
+        }
+
         immediateContext->SetRenderTargets(
             1, &pRTV, pDSV, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
 
@@ -184,9 +191,73 @@ public:
             DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     }
 
+    void resetRenderTarget() {
+        if(sampleCount == 1)
+            return;
+
+        const auto& SCDesc = swapChain->GetDesc();
+        // Create window-size multi-sampled offscreen render target
+        DE::TextureDesc colTexDesc = {};
+        colTexDesc.Name = "Color RTV";
+        colTexDesc.Type = DE::RESOURCE_DIM_TEX_2D;
+        colTexDesc.BindFlags = DE::BIND_RENDER_TARGET;
+        colTexDesc.Width = SCDesc.Width;
+        colTexDesc.Height = SCDesc.Height;
+        colTexDesc.MipLevels = 1;
+        colTexDesc.Format = SCDesc.ColorBufferFormat;
+        bool needSRGBConversion = device->GetDeviceCaps().IsD3DDevice() &&
+            (colTexDesc.Format == DE::TEX_FORMAT_RGBA8_UNORM_SRGB ||
+             colTexDesc.Format == DE::TEX_FORMAT_BGRA8_UNORM_SRGB);
+        if(needSRGBConversion) {
+            // Internally Direct3D swap chain images are not SRGB, and
+            // ResolveSubresource requires source and destination formats to
+            // match exactly or be typeless. So we will have to create a
+            // typeless texture and use SRGB render target view with it.
+            colTexDesc.Format =
+                colTexDesc.Format == DE::TEX_FORMAT_RGBA8_UNORM_SRGB ?
+                DE::TEX_FORMAT_RGBA8_TYPELESS :
+                DE::TEX_FORMAT_BGRA8_TYPELESS;
+        }
+
+        // Set the desired number of samples
+        colTexDesc.SampleCount = sampleCount;
+        // Define optimal clear value
+        colTexDesc.ClearValue.Format = SCDesc.ColorBufferFormat;
+        DE::RefCntAutoPtr<DE::ITexture> pColor;
+        device->CreateTexture(colTexDesc, nullptr, &pColor);
+
+        // Store the render target view
+        msaaColorRTV.Release();
+        if(needSRGBConversion) {
+            DE::TextureViewDesc RTVDesc;
+            RTVDesc.ViewType = DE::TEXTURE_VIEW_RENDER_TARGET;
+            RTVDesc.Format = SCDesc.ColorBufferFormat;
+            pColor->CreateView(RTVDesc, &msaaColorRTV);
+        } else {
+            msaaColorRTV =
+                pColor->GetDefaultView(DE::TEXTURE_VIEW_RENDER_TARGET);
+        }
+
+        // Create window-size multi-sampled depth buffer
+        DE::TextureDesc depthDesc = colTexDesc;
+        depthDesc.Name = "depth DSV";
+        depthDesc.Format = SCDesc.DepthBufferFormat;
+        depthDesc.BindFlags = DE::BIND_DEPTH_STENCIL;
+        // Define optimal clear value
+        depthDesc.ClearValue.Format = depthDesc.Format;
+
+        DE::RefCntAutoPtr<DE::ITexture> pDepth;
+        device->CreateTexture(depthDesc, nullptr, &pDepth);
+        // Store the depth-stencil view
+        msaaDepthDSV = pDepth->GetDefaultView(DE::TEXTURE_VIEW_DEPTH_STENCIL);
+    }
+
     DE::RefCntAutoPtr<DE::IRenderDevice> device;
     DE::RefCntAutoPtr<DE::IDeviceContext> immediateContext;
     DE::RefCntAutoPtr<DE::ISwapChain> swapChain;
+    DE::Uint32 sampleCount = 1;
+    DE::RefCntAutoPtr<DE::ITextureView> msaaColorRTV;
+    DE::RefCntAutoPtr<DE::ITextureView> msaaDepthDSV;
 };
 
 std::unique_ptr<Engine> gEngine;
@@ -257,6 +328,47 @@ bool stopGPUTimer(GPUtimer* timer, float* time) {
     return false;
 }
 
+#ifdef D3D11_SUPPORTED
+#include <d3d11.h>
+#endif  // D3D11_SUPPORTED
+#ifdef D3D12_SUPPORTED
+#include <d3d12.h>
+#endif  // D3D12_SUPPORTED
+
+DE::Uint8 getQualityLevel() {
+    auto dev = gEngine->device->GetDeviceCaps().DevType;
+    void* nativeHandle = gEngine->swapChain->GetCurrentBackBufferRTV()
+                             ->GetTexture()
+                             ->GetNativeHandle();
+#ifdef D3D11_SUPPORTED
+    if(dev == DE::RENDER_DEVICE_TYPE_D3D11) {
+        auto res = reinterpret_cast<ID3D11Resource*>(nativeHandle);
+        ID3D11Device* device = nullptr;
+        res->GetDevice(&device);
+        UINT level = 0;
+        device->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM,
+                                              gEngine->sampleCount, &level);
+        return static_cast<DE::Uint8>(level - 1);
+    }
+#endif  // D3D11_SUPPORTED
+#ifdef D3D12_SUPPORTED
+    if(dev == DE::RENDER_DEVICE_TYPE_D3D12) {
+        auto res = reinterpret_cast<ID3D12Resource*>(nativeHandle);
+        void* device = nullptr;
+        res->GetDevice(__uuidof(ID3D12Device), &device);
+        D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS
+        data = {};
+        data.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        data.SampleCount = gEngine->sampleCount;
+        data.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
+        reinterpret_cast<ID3D12Device*>(device)->CheckFeatureSupport(
+            D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &data, sizeof(data));
+        return static_cast<DE::Uint8>(data.NumQualityLevels - 1);
+    }
+#endif  // D3D12_SUPPORTED
+    return 0;
+}
+
 LRESULT CALLBACK MessageProc(HWND wnd, UINT message, WPARAM wParam,
                              LPARAM lParam);
 
@@ -286,7 +398,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
     ShowWindow(hwnd, cmdShow);
     UpdateWindow(hwnd);
 
-    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_GL);
+    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_D3D12);
 
     DemoData data;
     NVGcontext* vg = NULL;
@@ -299,14 +411,33 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
 
     auto&& SDesc = gEngine->swapChain->GetDesc();
 
-    vg = nvgCreateDE(gEngine->device, gEngine->immediateContext, 1,
-                     SDesc.ColorBufferFormat, SDesc.DepthBufferFormat,
-                     static_cast<int>(NVGCreateFlags::NVG_ANTIALIAS |
-                                      NVGCreateFlags::NVG_STENCIL_STROKES
+#ifdef NANOVG_MSAA
+    const auto& colorFmtInfo =
+        gEngine->device->GetTextureFormatInfoExt(SDesc.ColorBufferFormat);
+    const auto& depthFmtInfo =
+        gEngine->device->GetTextureFormatInfoExt(SDesc.DepthBufferFormat);
+    DE::Uint32 supportedSampleCounts =
+        colorFmtInfo.SampleCounts & depthFmtInfo.SampleCounts;
+    while(supportedSampleCounts & (gEngine->sampleCount << 1))
+        gEngine->sampleCount <<= 1;
+#endif  // NANOVG_MSAA
+
+    if(gEngine->sampleCount > 1)
+        gEngine->resetRenderTarget();
+
+    DE::SampleDesc msaa = {};
+    msaa.Count = gEngine->sampleCount;
+    msaa.Quality = getQualityLevel();
+
+    vg = nvgCreateDE(
+        gEngine->device, gEngine->immediateContext, msaa,
+        SDesc.ColorBufferFormat, SDesc.DepthBufferFormat,
+        static_cast<int>((msaa.Count == 1 ? NVGCreateFlags::NVG_ANTIALIAS : 0)
+    // | NVGCreateFlags::NVG_STENCIL_STROKES
 #ifdef _DEBUG
-                                      | NVGCreateFlags::NVG_DEBUG
+                         | NVGCreateFlags::NVG_DEBUG
 #endif
-                                      ));
+                         ));
 
     if(loadDemoData(vg, &data) == -1)
         return -1;
@@ -322,7 +453,6 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         } else {
-
             auto cur = Clock::now();
             constexpr auto den = Clock::period::den;
             float delta = static_cast<float>((cur - lastTime).count()) / den;
@@ -381,12 +511,27 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
             if(stopGPUTimer(&gpuTimer, &gpuTime))
                 updateGraph(&gpuGraph, gpuTime);
 
+            if(gEngine->sampleCount > 1) {
+                // Resolve multi-sampled render taget into the current swap
+                // chain back buffer.
+                auto pCurrentBackBuffer =
+                    gEngine->swapChain->GetCurrentBackBufferRTV()->GetTexture();
+
+                DE::ResolveTextureSubresourceAttribs RA = {};
+                RA.SrcTextureTransitionMode =
+                    DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION;
+                RA.DstTextureTransitionMode =
+                    DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION;
+                gEngine->immediateContext->ResolveTextureSubresource(
+                    gEngine->msaaColorRTV->GetTexture(), pCurrentBackBuffer,
+                    RA);
+            }
+
             if(screenshot) {
                 screenshot = false;
                 saveScreenShot();
             }
 
-            // TODO:MSAA
             gEngine->swapChain->Present(0U);
         }
     }
@@ -439,8 +584,10 @@ LRESULT CALLBACK MessageProc(HWND wnd, UINT message, WPARAM wParam,
             return 0;
         }
         case WM_SIZE:
-            if(gEngine)
+            if(gEngine) {
                 gEngine->swapChain->Resize(LOWORD(lParam), HIWORD(lParam));
+                gEngine->resetRenderTarget();
+            }
             return 0;
 
         case WM_CHAR:

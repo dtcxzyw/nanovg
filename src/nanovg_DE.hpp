@@ -36,6 +36,7 @@ enum NVGCreateFlags {
 };
 
 NVGcontext* nvgCreateDE(DE::IRenderDevice* device, DE::IDeviceContext* context,
-                        int MSAA, DE::TEXTURE_FORMAT colorFormat,
+                        const DE::SampleDesc& MSAA,
+                        DE::TEXTURE_FORMAT colorFormat,
                         DE::TEXTURE_FORMAT depthFormat, int flags);
 void nvgDeleteDE(NVGcontext* ctx);

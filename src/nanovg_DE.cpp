@@ -177,7 +177,8 @@ struct StateHasher final {
 struct NVGDEContext final {
     DE::IRenderDevice* device;
     DE::IDeviceContext* context;
-    int MSAA, flags;
+    DE::SampleDesc MSAA;
+    int flags;
 
     DE::RefCntAutoPtr<DE::IShader> pVS, pPS;
     DE::PipelineStateDesc defaultState;
@@ -435,8 +436,7 @@ static int nvgde_renderCreate(void* uptr) {
         context->device->CreateShader(shaderCI, &(context->pPS));
     }
 
-    // PSODesc.GraphicsPipeline.SmplDesc.Count = context->MSAA;
-    // TODO:MSAA
+    PSODesc.GraphicsPipeline.SmplDesc = context->MSAA;
 
     PSODesc.GraphicsPipeline.pVS = context->pVS;
     PSODesc.GraphicsPipeline.pPS = context->pPS;
@@ -1118,10 +1118,12 @@ static void nvgde_renderTriangles(void* uptr, NVGpaint* paint,
 
     context->calls.push_back(call);
 }
+
 static void nvgde_renderDelete(void* uptr) {
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
     delete context;
 }
+
 static auto generateSampler(DE::IRenderDevice* device, int imageFlags) {
     DE::SamplerDesc sd = {};
     sd.Name = "NanoVG Sampler";
@@ -1143,10 +1145,14 @@ static auto generateSampler(DE::IRenderDevice* device, int imageFlags) {
 }
 
 NVGcontext* nvgCreateDE(DE::IRenderDevice* device, DE::IDeviceContext* context,
-                        int MSAA, DE::TEXTURE_FORMAT colorFormat,
+                        const DE::SampleDesc& MSAA,
+                        DE::TEXTURE_FORMAT colorFormat,
                         DE::TEXTURE_FORMAT depthFormat, int flags) {
     CHECK_ERR(depthFormat == DE::TEX_FORMAT_D24_UNORM_S8_UINT,
               "Need stencil buffer.");
+    CHECK_WARN(
+        MSAA.Count == 1 || !(flags & NVG_ANTIALIAS),
+        "Geometry based anti-aliasing may not be needed when using MSAA.");
     auto ptr = new NVGDEContext;
 
     ptr->device = device;

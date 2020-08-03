@@ -170,6 +170,9 @@ struct StateHasher final {
             push(depthStencil.BackFace);
         }
         push(state.GraphicsPipeline.PrimitiveTopology);
+
+        // sampler's flag
+        push(state.ResourceLayout.NumStaticSamplers);
         return res;
     }
 };
@@ -185,7 +188,6 @@ struct NVGDEContext final {
     StateCache<DE::PipelineStateDesc, NVGDEPipelineState, StateHasher> pipeline;
 
     ResourceManager<NVGDETexture> texture;
-    StateCache<int, DE::RefCntAutoPtr<DE::ISampler>> sampler;
 
     std::vector<NVGDECall> calls;
 
@@ -367,12 +369,27 @@ static void prepareVertexBuffer(NVGDEContext* context, int siz) {
     bufferDesc.CPUAccessFlags = DE::CPU_ACCESS_WRITE;
 
     context->device->CreateBuffer(bufferDesc, nullptr, &(context->vertBuffer));
-    DE::IBuffer* buf = context->vertBuffer;
-    DE::Uint32 voff = 0;
-    context->context->SetVertexBuffers(
-        0, 1, &buf, &voff, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
-        DE::SET_VERTEX_BUFFERS_FLAG_RESET);
 }
+static DE::StaticSamplerDesc setSampler(int imageFlags) {
+    DE::StaticSamplerDesc desc = {};
+    desc.SamplerOrTextureName = "gTexture";
+    desc.ShaderStages = DE::SHADER_TYPE_PIXEL;
+    auto&& sd = desc.Desc;
+    sd.Name = "NanoVG Sampler";
+    sd.AddressU = (imageFlags & NVG_IMAGE_REPEATX ? DE::TEXTURE_ADDRESS_WRAP :
+                                                    DE::TEXTURE_ADDRESS_CLAMP);
+    sd.AddressV = (imageFlags & NVG_IMAGE_REPEATY ? DE::TEXTURE_ADDRESS_WRAP :
+                                                    DE::TEXTURE_ADDRESS_CLAMP);
+    sd.AddressW = DE::TEXTURE_ADDRESS_WRAP;
+
+    if(imageFlags & NVG_IMAGE_NEAREST) {
+        sd.MinFilter = sd.MagFilter = sd.MipFilter = DE::FILTER_TYPE_POINT;
+    } else {
+        sd.MinFilter = sd.MagFilter = sd.MipFilter = DE::FILTER_TYPE_LINEAR;
+    }
+    return desc;
+}
+
 static int nvgde_renderCreate(void* uptr) {
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
 
@@ -464,20 +481,15 @@ static int nvgde_renderCreate(void* uptr) {
     PSODesc.ResourceLayout.DefaultVariableType =
         DE::SHADER_RESOURCE_VARIABLE_TYPE_STATIC;
 
-    /*
-    static DE::StaticSamplerDesc SSDesc[] = { DE::StaticSamplerDesc{
-        DE::SHADER_TYPE_PIXEL, "gTexture",
-        DE::SamplerDesc{ DE::FILTER_TYPE_LINEAR, DE::FILTER_TYPE_LINEAR,
-                         DE::FILTER_TYPE_LINEAR } } };
-    PSODesc.ResourceLayout.NumStaticSamplers =
-        static_cast<DE::Uint32>(std::size(SSDesc));
-    PSODesc.ResourceLayout.StaticSamplers = SSDesc;
-    */
-
     context->pipeline.setGenerator(
         [context](const DE::PipelineStateDesc& PSODesc) {
             DE::PipelineStateCreateInfo PSOCI;
             PSOCI.PSODesc = PSODesc;
+
+            DE::StaticSamplerDesc SSDesc =
+                setSampler(PSODesc.ResourceLayout.NumStaticSamplers);
+            PSOCI.PSODesc.ResourceLayout.NumStaticSamplers = 1U;
+            PSOCI.PSODesc.ResourceLayout.StaticSamplers = &SSDesc;
 
             NVGDEPipelineState pipeline;
             context->device->CreatePipelineState(PSOCI, &pipeline.PSO);
@@ -496,7 +508,7 @@ static int nvgde_renderCreate(void* uptr) {
     nvgde_renderCreateTexture(uptr, NVG_TEXTURE_ALPHA, 1, 1, 0, &black);
 
     prepareTriangleFansIndexBuffer(context, 1024);
-    prepareVertexBuffer(context, 32768);
+    prepareVertexBuffer(context, 16384);
     return 1;
 }
 static int nvgde_renderCreateTexture(void* uptr, int type, int w, int h,
@@ -532,7 +544,6 @@ static int nvgde_renderCreateTexture(void* uptr, int type, int w, int h,
     context->device->CreateTexture(desc, data ? &tdata : nullptr, &tex.tex);
 
     tex.texView = tex.tex->GetDefaultView(DE::TEXTURE_VIEW_SHADER_RESOURCE);
-    tex.texView->SetSampler(context->sampler.get(imageFlags));
     if(imageFlags & DE::MISC_TEXTURE_FLAG_GENERATE_MIPS)
         context->context->GenerateMips(tex.texView);
 
@@ -591,9 +602,6 @@ static void bindUniform(NVGDEContext* context, const Uniform& uni) {
                                  DE::MAP_WRITE, DE::MAP_FLAG_DISCARD);
     *guard = uni;
 }
-static void bindTex(DE::IShaderResourceBinding* SRB, NVGDETexture& tex) {
-    SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gTexture")->Set(tex.texView);
-}
 
 static void nvgde_renderFlush(void* uptr) {
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
@@ -616,6 +624,7 @@ static void nvgde_renderFlush(void* uptr) {
 
         prepareVertexBuffer(context, siz);
 
+        // TODO:batch
         {
             DE::MapHelper<NVGvertex> guard(context->context,
                                            context->vertBuffer, DE::MAP_WRITE,
@@ -628,11 +637,8 @@ static void nvgde_renderFlush(void* uptr) {
         }
     }
 
-    auto setStencil = [&](DE::Uint32 ref, DE::Uint32 mask,
-                          DE::COMPARISON_FUNCTION func, DE::STENCIL_OP sfail,
+    auto setStencil = [&](DE::COMPARISON_FUNCTION func, DE::STENCIL_OP sfail,
                           DE::STENCIL_OP zfail, DE::STENCIL_OP zpass) {
-        immediateContext->SetStencilRef(ref);
-        depthStencil.StencilReadMask = depthStencil.StencilWriteMask = mask;
         stencilFront.StencilFunc = stencilBack.StencilFunc = func;
         stencilFront.StencilFailOp = stencilBack.StencilFailOp = sfail;
         stencilFront.StencilDepthFailOp = stencilBack.StencilDepthFailOp =
@@ -641,9 +647,14 @@ static void nvgde_renderFlush(void* uptr) {
     };
 
     auto prepareRendering = [&](int image) {
+        auto&& tex = context->texture.get(image);
+
+        curState.ResourceLayout.NumStaticSamplers = tex.flags;
+
         NVGDEPipelineState& pipeline = context->pipeline.get(curState);
 
-        bindTex(pipeline.SRB, context->texture.get(image));
+        pipeline.SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gTexture")
+            ->Set(tex.texView);
 
         immediateContext->SetPipelineState(pipeline.PSO);
         immediateContext->CommitShaderResources(
@@ -674,9 +685,11 @@ static void nvgde_renderFlush(void* uptr) {
                [](const NVGDEPath& path) { return path.fillCount > 2; }))
             return;
         primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
         immediateContext->SetIndexBuffer(
             context->triangleFansIndex, 0U,
             DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+
         prepareRendering(image);
         for(const auto& path : call.path)
             if(path.fillCount > 2) {
@@ -714,6 +727,15 @@ static void nvgde_renderFlush(void* uptr) {
         prepareTriangleFansIndexBuffer(context, maxFillCount - 2);
     }
 
+    immediateContext->SetStencilRef(0);
+    {
+        DE::IBuffer* buf = context->vertBuffer;
+        DE::Uint32 voff = 0;
+        context->context->SetVertexBuffers(
+            0, 1, &buf, &voff, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
+            DE::SET_VERTEX_BUFFERS_FLAG_RESET);
+    }
+
     for(const auto& call : context->calls) {
         // setBlend
         {
@@ -727,9 +749,8 @@ static void nvgde_renderFlush(void* uptr) {
             case Type::fill: {
                 // Draw shapes
                 depthStencil.StencilEnable = true;
-                setStencil(0, 0xff, DE::COMPARISON_FUNC_ALWAYS,
-                           DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP,
-                           DE::STENCIL_OP_KEEP);
+                setStencil(DE::COMPARISON_FUNC_ALWAYS, DE::STENCIL_OP_KEEP,
+                           DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP);
                 blend.RenderTargetWriteMask = 0;
 
                 // set bindpoint for solid loc
@@ -747,17 +768,15 @@ static void nvgde_renderFlush(void* uptr) {
                 bindUniform(context, call.uniform[1]);
 
                 if(context->flags & NVGCreateFlags::NVG_ANTIALIAS) {
-                    setStencil(0x00, 0xff, DE::COMPARISON_FUNC_EQUAL,
-                               DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP,
-                               DE::STENCIL_OP_KEEP);
+                    setStencil(DE::COMPARISON_FUNC_EQUAL, DE::STENCIL_OP_KEEP,
+                               DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP);
                     // Draw fringes
                     drawStroke(call, call.image);
                 }
 
                 // Draw fill
-                setStencil(0x0, 0xff, DE::COMPARISON_FUNC_NOT_EQUAL,
-                           DE::STENCIL_OP_ZERO, DE::STENCIL_OP_ZERO,
-                           DE::STENCIL_OP_ZERO);
+                setStencil(DE::COMPARISON_FUNC_NOT_EQUAL, DE::STENCIL_OP_ZERO,
+                           DE::STENCIL_OP_ZERO, DE::STENCIL_OP_ZERO);
                 drawTriangle(call, call.image,
                              DE::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
 
@@ -776,9 +795,8 @@ static void nvgde_renderFlush(void* uptr) {
                     depthStencil.StencilEnable = true;
 
                     // Fill the stroke base without overlap
-                    setStencil(0x0, 0xff, DE::COMPARISON_FUNC_EQUAL,
-                               DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP,
-                               DE::STENCIL_OP_INCR_SAT);
+                    setStencil(DE::COMPARISON_FUNC_EQUAL, DE::STENCIL_OP_KEEP,
+                               DE::STENCIL_OP_KEEP, DE::STENCIL_OP_INCR_SAT);
 
                     bindUniform(context, call.uniform[1]);
 
@@ -787,18 +805,16 @@ static void nvgde_renderFlush(void* uptr) {
                     // Draw anti-aliased pixels.
                     bindUniform(context, call.uniform[0]);
 
-                    setStencil(0x00, 0xff, DE::COMPARISON_FUNC_EQUAL,
-                               DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP,
-                               DE::STENCIL_OP_KEEP);
+                    setStencil(DE::COMPARISON_FUNC_EQUAL, DE::STENCIL_OP_KEEP,
+                               DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP);
 
                     drawStroke(call, call.image);
 
                     // Clear stencil buffer.
                     blend.RenderTargetWriteMask = 0;
 
-                    setStencil(0x0, 0xff, DE::COMPARISON_FUNC_ALWAYS,
-                               DE::STENCIL_OP_ZERO, DE::STENCIL_OP_ZERO,
-                               DE::STENCIL_OP_ZERO);
+                    setStencil(DE::COMPARISON_FUNC_ALWAYS, DE::STENCIL_OP_ZERO,
+                               DE::STENCIL_OP_ZERO, DE::STENCIL_OP_ZERO);
                     drawStroke(call, call.image);
 
                     blend.RenderTargetWriteMask = DE::COLOR_MASK_ALL;
@@ -1124,26 +1140,6 @@ static void nvgde_renderDelete(void* uptr) {
     delete context;
 }
 
-static auto generateSampler(DE::IRenderDevice* device, int imageFlags) {
-    DE::SamplerDesc sd = {};
-    sd.Name = "NanoVG Sampler";
-    sd.AddressU = (imageFlags & NVG_IMAGE_REPEATX ? DE::TEXTURE_ADDRESS_WRAP :
-                                                    DE::TEXTURE_ADDRESS_CLAMP);
-    sd.AddressV = (imageFlags & NVG_IMAGE_REPEATY ? DE::TEXTURE_ADDRESS_WRAP :
-                                                    DE::TEXTURE_ADDRESS_CLAMP);
-    sd.AddressW = DE::TEXTURE_ADDRESS_WRAP;
-
-    if(imageFlags & NVG_IMAGE_NEAREST) {
-        sd.MinFilter = sd.MagFilter = sd.MipFilter = DE::FILTER_TYPE_POINT;
-    } else {
-        sd.MinFilter = sd.MagFilter = sd.MipFilter = DE::FILTER_TYPE_LINEAR;
-    }
-
-    DE::RefCntAutoPtr<DE::ISampler> sampler;
-    device->CreateSampler(sd, &sampler);
-    return sampler;
-}
-
 NVGcontext* nvgCreateDE(DE::IRenderDevice* device, DE::IDeviceContext* context,
                         const DE::SampleDesc& MSAA,
                         DE::TEXTURE_FORMAT colorFormat,
@@ -1162,8 +1158,6 @@ NVGcontext* nvgCreateDE(DE::IRenderDevice* device, DE::IDeviceContext* context,
     ptr->depthFormat = depthFormat;
     ptr->flags = flags;
     ptr->indexSize = 0;
-    ptr->sampler.setGenerator(
-        [device](int flags) { return generateSampler(device, flags); });
 
     NVGparams params = {};
     params.edgeAntiAlias = (flags & NVGCreateFlags::NVG_ANTIALIAS);

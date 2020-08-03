@@ -30,8 +30,9 @@ namespace DE = Diligent;
 #include "nanovg.h"
 
 enum NVGCreateFlags {
-    NVG_STENCIL_STROKES = 1 << 0,
-    NVG_DEBUG = 1 << 1,
+    NVG_ANTIALIAS = 1 << 0,
+    NVG_STENCIL_STROKES = 1 << 1,
+    NVG_DEBUG = 1 << 2
 };
 
 NVGcontext* nvgCreateDE(DE::IRenderDevice* device, DE::IDeviceContext* context,

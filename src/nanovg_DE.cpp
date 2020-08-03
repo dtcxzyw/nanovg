@@ -193,6 +193,8 @@ struct NVGDEContext final {
 
     DE::RefCntAutoPtr<DE::IBuffer> triangleFansIndex;
     int indexSize;
+
+    DE::RefCntAutoPtr<DE::IBuffer> vertBuffer;
 };
 
 static const char* vertShader = R"(
@@ -284,7 +286,7 @@ void PS(in PSInput pin, out float4 result : SV_TARGET) {
     } else if(type == 1) {  // Image
         // Calculate color fron texture
         float2 pt = mulx(paintMat , float3(fpos, 1.0f)).xy / extent;
-        float4 color = gTexture.Sample(gTextureSampler, ftcoord);
+        float4 color = gTexture.Sample(gTextureSampler, pt);
         if(texType == 1)
             color = float4(color.xyz * color.w, color.w);
         else if(texType == 2)
@@ -309,7 +311,67 @@ void PS(in PSInput pin, out float4 result : SV_TARGET) {
 )";
 static int nvgde_renderCreateTexture(void* uptr, int type, int w, int h,
                                      int imageFlags, const unsigned char* data);
-static void prepareTriangleFansIndexBuffer(NVGDEContext* context, int siz);
+int nearestPowerOf2(int siz) {
+    int res = 1;
+    while(res < siz)
+        res *= 2;
+    return res;
+};
+static void prepareTriangleFansIndexBuffer(NVGDEContext* context, int siz) {
+    if(siz <= context->indexSize)
+        return;
+    siz = context->indexSize = nearestPowerOf2(siz);
+    context->triangleFansIndex.Release();
+    DE::BufferDesc bufferDesc = {};
+    bufferDesc.BindFlags = DE::BIND_INDEX_BUFFER;
+    bufferDesc.Name = "NanoVG Triangle Fans Index Buffer";
+    bufferDesc.uiSizeInBytes = siz * 3 * sizeof(int);
+    bufferDesc.Usage = DE::USAGE_STATIC;
+
+    std::vector<int> index(3 * siz);
+    int* ptr = index.data();
+    for(int i = 0; i < siz; ++i) {
+        ++ptr;
+        *ptr = i + 1;
+        ++ptr;
+        *ptr = i + 2;
+        ++ptr;
+    }
+
+    DE::BufferData bufferData = {};
+    bufferData.DataSize = bufferDesc.uiSizeInBytes;
+    bufferData.pData = index.data();
+    context->device->CreateBuffer(bufferDesc, &bufferData,
+                                  &(context->triangleFansIndex));
+    /*
+    context->context->SetIndexBuffer(
+        context->triangleFansIndex, 0U,
+        DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        */
+}
+static void prepareVertexBuffer(NVGDEContext* context, int siz) {
+    int oldSiz = context->vertBuffer ?
+        context->vertBuffer->GetDesc().uiSizeInBytes / sizeof(NVGvertex) :
+        0;
+    if(siz <= oldSiz)
+        return;
+    siz = nearestPowerOf2(siz);
+
+    context->vertBuffer.Release();
+    DE::BufferDesc bufferDesc = {};
+    bufferDesc.BindFlags = DE::BIND_VERTEX_BUFFER;
+    bufferDesc.Name = "NanoVG Vertex Buffer";
+    bufferDesc.uiSizeInBytes = siz * sizeof(NVGvertex);
+    bufferDesc.Usage = DE::USAGE_DYNAMIC;
+    bufferDesc.CPUAccessFlags = DE::CPU_ACCESS_WRITE;
+
+    context->device->CreateBuffer(bufferDesc, nullptr, &(context->vertBuffer));
+    DE::IBuffer* buf = context->vertBuffer;
+    DE::Uint32 voff = 0;
+    context->context->SetVertexBuffers(
+        0, 1, &buf, &voff, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
+        DE::SET_VERTEX_BUFFERS_FLAG_RESET);
+}
 static int nvgde_renderCreate(void* uptr) {
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
 
@@ -334,7 +396,7 @@ static int nvgde_renderCreate(void* uptr) {
 
     DE::DepthStencilStateDesc& SDesc =
         PSODesc.GraphicsPipeline.DepthStencilDesc;
-    SDesc.StencilEnable = true;
+    SDesc.StencilEnable = false;
     SDesc.FrontFace.StencilFunc = SDesc.BackFace.StencilFunc =
         DE::COMPARISON_FUNC_ALWAYS;
     SDesc.FrontFace.StencilDepthFailOp = SDesc.FrontFace.StencilFailOp =
@@ -366,7 +428,7 @@ static int nvgde_renderCreate(void* uptr) {
         shaderCI.Desc.Name = "NanoVG PS";
         shaderCI.Source = fragShader;
         DE::ShaderMacroHelper macros;
-        if(context->MSAA == 1) {
+        if(context->flags & NVGCreateFlags::NVG_ANTIALIAS) {
             macros.AddShaderMacro("EDGE_AA", true);
             shaderCI.Macros = macros;
         }
@@ -434,6 +496,7 @@ static int nvgde_renderCreate(void* uptr) {
     nvgde_renderCreateTexture(uptr, NVG_TEXTURE_ALPHA, 1, 1, 0, &black);
 
     prepareTriangleFansIndexBuffer(context, 1024);
+    prepareVertexBuffer(context, 32768);
     return 1;
 }
 static int nvgde_renderCreateTexture(void* uptr, int type, int w, int h,
@@ -470,6 +533,8 @@ static int nvgde_renderCreateTexture(void* uptr, int type, int w, int h,
 
     tex.texView = tex.tex->GetDefaultView(DE::TEXTURE_VIEW_SHADER_RESOURCE);
     tex.texView->SetSampler(context->sampler.get(imageFlags));
+    if(imageFlags & DE::MISC_TEXTURE_FLAG_GENERATE_MIPS)
+        context->context->GenerateMips(tex.texView);
 
     tex.flags = imageFlags;
     tex.type = type;
@@ -529,44 +594,7 @@ static void bindUniform(NVGDEContext* context, const Uniform& uni) {
 static void bindTex(DE::IShaderResourceBinding* SRB, NVGDETexture& tex) {
     SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gTexture")->Set(tex.texView);
 }
-static void prepareTriangleFansIndexBuffer(NVGDEContext* context, int siz) {
-    if(siz <= context->indexSize)
-        return;
-    auto nearestPowerOf2 = [&](int siz) {
-        int res = 1;
-        while(res < siz)
-            res *= 2;
-        return res;
-    };
-    context->indexSize = nearestPowerOf2(siz);
-    context->triangleFansIndex.Release();
-    DE::BufferDesc bufferDesc = {};
-    bufferDesc.BindFlags = DE::BIND_INDEX_BUFFER;
-    bufferDesc.Name = "NanoVG Triangle Fans Index Buffer";
-    bufferDesc.uiSizeInBytes = siz * 3 * sizeof(int);
-    bufferDesc.Usage = DE::USAGE_STATIC;
 
-    std::vector<int> index(3 * siz);
-    int* ptr = index.data();
-    for(int i = 0; i < siz; ++i) {
-        ++ptr;
-        *ptr = i + 1;
-        ++ptr;
-        *ptr = i + 2;
-        ++ptr;
-    }
-
-    DE::BufferData bufferData = {};
-    bufferData.DataSize = bufferDesc.uiSizeInBytes;
-    bufferData.pData = index.data();
-    context->device->CreateBuffer(bufferDesc, &bufferData,
-                                  &(context->triangleFansIndex));
-    /*
-    context->context->SetIndexBuffer(
-        context->triangleFansIndex, 0U,
-        DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-        */
-}
 static void nvgde_renderFlush(void* uptr) {
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
     auto immediateContext = context->context;
@@ -579,7 +607,6 @@ static void nvgde_renderFlush(void* uptr) {
     auto&& stencilBack = depthStencil.BackFace;
     auto&& primitiveTopology = curState.GraphicsPipeline.PrimitiveTopology;
 
-    DE::RefCntAutoPtr<DE::IBuffer> vertBuffer;
     {
         int siz = 0;
         for(auto& call : context->calls) {
@@ -587,28 +614,18 @@ static void nvgde_renderFlush(void* uptr) {
             siz += static_cast<int>(call.vert.size());
         }
 
-        std::vector<NVGvertex> verts(siz);
-        for(const auto& call : context->calls) {
-            memcpy(verts.data() + call.vertOffset, call.vert.data(),
-                   call.vert.size() * sizeof(NVGvertex));
+        prepareVertexBuffer(context, siz);
+
+        {
+            DE::MapHelper<NVGvertex> guard(context->context,
+                                           context->vertBuffer, DE::MAP_WRITE,
+                                           DE::MAP_FLAG_DISCARD);
+            NVGvertex* ptr = guard;
+            for(const auto& call : context->calls) {
+                memcpy(ptr + call.vertOffset, call.vert.data(),
+                       call.vert.size() * sizeof(NVGvertex));
+            }
         }
-        DE::BufferDesc bufDesc = {};
-        bufDesc.BindFlags = DE::BIND_VERTEX_BUFFER;
-        bufDesc.Name = "NanoVG Vertex Buffer";
-        bufDesc.uiSizeInBytes =
-            static_cast<DE::Uint32>(siz * sizeof(NVGvertex));
-        bufDesc.Usage = DE::USAGE_STATIC;
-        DE::BufferData bufData = {};
-        bufData.DataSize = bufDesc.uiSizeInBytes;
-        bufData.pData = verts.data();
-        context->device->CreateBuffer(bufDesc, &bufData, &vertBuffer);
-        /*
-        DE::IBuffer* buf = vertBuffer;
-        DE::Uint32 voff = 0;
-        immediateContext->SetVertexBuffers(
-            0, 1, &buf, &voff, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
-            DE::SET_VERTEX_BUFFERS_FLAG_RESET);
-            */
     }
 
     auto setStencil = [&](DE::Uint32 ref, DE::Uint32 mask,
@@ -625,19 +642,8 @@ static void nvgde_renderFlush(void* uptr) {
 
     auto prepareRendering = [&](int image) {
         NVGDEPipelineState& pipeline = context->pipeline.get(curState);
-        // Notice:bind order:tex vertex index PSO
 
         bindTex(pipeline.SRB, context->texture.get(image));
-
-        DE::IBuffer* buf = vertBuffer;
-        DE::Uint32 voff = 0;
-        immediateContext->SetVertexBuffers(
-            0, 1, &buf, &voff, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
-            DE::SET_VERTEX_BUFFERS_FLAG_RESET);
-
-        context->context->SetIndexBuffer(
-            context->triangleFansIndex, 0U,
-            DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
 
         immediateContext->SetPipelineState(pipeline.PSO);
         immediateContext->CommitShaderResources(
@@ -668,6 +674,9 @@ static void nvgde_renderFlush(void* uptr) {
                [](const NVGDEPath& path) { return path.fillCount > 2; }))
             return;
         primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        immediateContext->SetIndexBuffer(
+            context->triangleFansIndex, 0U,
+            DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
         prepareRendering(image);
         for(const auto& path : call.path)
             if(path.fillCount > 2) {
@@ -737,7 +746,7 @@ static void nvgde_renderFlush(void* uptr) {
                 blend.RenderTargetWriteMask = DE::COLOR_MASK_ALL;
                 bindUniform(context, call.uniform[1]);
 
-                if(context->MSAA == 1) {
+                if(context->flags & NVGCreateFlags::NVG_ANTIALIAS) {
                     setStencil(0x00, 0xff, DE::COMPARISON_FUNC_EQUAL,
                                DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP,
                                DE::STENCIL_OP_KEEP);
@@ -795,11 +804,6 @@ static void nvgde_renderFlush(void* uptr) {
                     blend.RenderTargetWriteMask = DE::COLOR_MASK_ALL;
 
                     depthStencil.StencilEnable = false;
-
-                    //		glnvg__convertPaint(gl, nvg__fragUniformPtr(gl,
-                    // call->uniformOffset + gl->fragSize), paint, scissor,
-                    // strokeWidth, fringe, 1.0f - 0.5f/255.0f);
-
                 } else {
                     bindUniform(context, call.uniform[0]);
                     // Draw Strokes
@@ -1126,11 +1130,13 @@ static auto generateSampler(DE::IRenderDevice* device, int imageFlags) {
     sd.AddressV = (imageFlags & NVG_IMAGE_REPEATY ? DE::TEXTURE_ADDRESS_WRAP :
                                                     DE::TEXTURE_ADDRESS_CLAMP);
     sd.AddressW = DE::TEXTURE_ADDRESS_WRAP;
+
     if(imageFlags & NVG_IMAGE_NEAREST) {
         sd.MinFilter = sd.MagFilter = sd.MipFilter = DE::FILTER_TYPE_POINT;
     } else {
         sd.MinFilter = sd.MagFilter = sd.MipFilter = DE::FILTER_TYPE_LINEAR;
     }
+
     DE::RefCntAutoPtr<DE::ISampler> sampler;
     device->CreateSampler(sd, &sampler);
     return sampler;
@@ -1139,6 +1145,8 @@ static auto generateSampler(DE::IRenderDevice* device, int imageFlags) {
 NVGcontext* nvgCreateDE(DE::IRenderDevice* device, DE::IDeviceContext* context,
                         int MSAA, DE::TEXTURE_FORMAT colorFormat,
                         DE::TEXTURE_FORMAT depthFormat, int flags) {
+    CHECK_ERR(depthFormat == DE::TEX_FORMAT_D24_UNORM_S8_UINT,
+              "Need stencil buffer.");
     auto ptr = new NVGDEContext;
 
     ptr->device = device;
@@ -1152,7 +1160,7 @@ NVGcontext* nvgCreateDE(DE::IRenderDevice* device, DE::IDeviceContext* context,
         [device](int flags) { return generateSampler(device, flags); });
 
     NVGparams params = {};
-    params.edgeAntiAlias = (MSAA != 1);
+    params.edgeAntiAlias = (flags & NVGCreateFlags::NVG_ANTIALIAS);
     params.renderCancel = nvgde_renderCancel;
     params.renderCreate = nvgde_renderCreate;
     params.renderCreateTexture = nvgde_renderCreateTexture;

@@ -66,6 +66,9 @@ public:
         DE::SwapChainDesc SCDesc;
         SCDesc.DefaultDepthValue = 1.0f;
         SCDesc.DefaultStencilValue = 0;
+        SCDesc.DepthBufferFormat = DE::TEX_FORMAT_D24_UNORM_S8_UINT;
+        SCDesc.Usage = DE::SWAP_CHAIN_USAGE_RENDER_TARGET |
+            DE::SWAP_CHAIN_USAGE_COPY_SOURCE;
 
         switch(type) {
 #if D3D11_SUPPORTED
@@ -223,6 +226,8 @@ void saveScreenShot() {
         0, nullptr, nullptr, DE::RESOURCE_STATE_TRANSITION_MODE_NONE);
     DE::ScreenCapture sc(gEngine->device);
     sc.Capture(gEngine->swapChain, gEngine->immediateContext, 0);
+    while(!sc.HasCapture())
+        gEngine->device->IdleGPU();
     auto cap = sc.GetCapture();
     SaveScreenCapture("dump.png", cap);
 }
@@ -296,8 +301,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
 
     vg = nvgCreateDE(gEngine->device, gEngine->immediateContext, 1,
                      SDesc.ColorBufferFormat, SDesc.DepthBufferFormat,
-                     static_cast<int>(NVGCreateFlags::NVG_STENCIL_STROKES |
-                                      NVGCreateFlags::NVG_DEBUG));
+                     static_cast<int>(NVGCreateFlags::NVG_ANTIALIAS |
+                                      NVGCreateFlags::NVG_STENCIL_STROKES
+#ifdef _DEBUG
+                                      | NVGCreateFlags::NVG_DEBUG
+#endif
+                                      ));
 
     if(loadDemoData(vg, &data) == -1)
         return -1;
@@ -350,6 +359,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
 
             nvgBeginFrame(vg, static_cast<float>(winWidth),
                           static_cast<float>(winHeight), pxRatio);
+
             renderDemo(vg, static_cast<float>(mx), static_cast<float>(my),
                        static_cast<float>(winWidth),
                        static_cast<float>(winHeight), sum, blowup, &data);
@@ -358,6 +368,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
             renderGraph(vg, 5 + 200 + 5, 5, &cpuGraph);
             if(gpuTimer.supported)
                 renderGraph(vg, 5 + 200 + 5 + 200 + 5, 5, &gpuGraph);
+
             nvgEndFrame(vg);
 
             auto ct = Clock::now();

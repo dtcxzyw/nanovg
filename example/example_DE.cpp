@@ -398,7 +398,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
     ShowWindow(hwnd, cmdShow);
     UpdateWindow(hwnd);
 
-    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_GL);
+    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_D3D11);
 
     DemoData data;
     NVGcontext* vg = NULL;

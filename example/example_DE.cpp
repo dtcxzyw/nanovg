@@ -398,7 +398,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
     ShowWindow(hwnd, cmdShow);
     UpdateWindow(hwnd);
 
-    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_D3D12);
+    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_GL);
 
     DemoData data;
     NVGcontext* vg = NULL;
@@ -548,7 +548,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
            << " ms\n";
         ss << "          GPU Time: " << (getGraphAverage(&cpuGraph) * 1000.0f)
            << " ms\n";
-        MessageBoxA(hwnd, "exit", ss.str().c_str(), MB_OK);
+        std::string str = ss.str();
+        OutputDebugStringA(str.c_str());
     }
 
     gEngine.reset();

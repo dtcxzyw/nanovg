@@ -45,7 +45,7 @@ struct Uniform final {
     int type;
 };
 
-static_assert(sizeof(Uniform) == 11 * 4 * sizeof(float));
+static_assert(sizeof(Uniform) % 16 == 0);
 
 struct NVGDEPipelineState final {
     DE::RefCntAutoPtr<DE::IPipelineState> PSO;
@@ -107,9 +107,15 @@ public:
         res = mGenerator(key);
         return res;
     }
+    auto begin() {
+        return mMap.begin();
+    }
+    auto end() {
+        return mMap.end();
+    }
 };
 
-enum class Type { fill, convexFill, stroke, triangles };
+enum class Type { Fill, ConvexFill, Stroke, Triangles };
 enum class ShaderType {
     NSVG_SHADER_FILLGRAD,
     NSVG_SHADER_FILLIMG,
@@ -131,6 +137,7 @@ struct NVGDEPath {
 struct NVGDECall final {
     Type type;
     int image, triangleOffset, triangleCount, pathOffset, pathCount;
+    int drawIndirectOffset[3];
     int uniform[2];
     BlendFactor blendFactor;
 };
@@ -372,46 +379,65 @@ static void prepareTriangleFansIndexBuffer(NVGDEContext* context, int siz) {
     context->device->CreateBuffer(bufferDesc, &bufferData,
                                   &(context->triangleFansIndex));
 }
-static void prepareVertexBuffer(NVGDEContext* context, int siz) {
+static void prepareVertexBuffer(NVGDEContext* context, int siz,
+                                const NVGvertex* data) {
     int oldSiz = context->vertBuffer ?
         context->vertBuffer->GetDesc().uiSizeInBytes / sizeof(NVGvertex) :
         0;
-    if(siz <= oldSiz)
-        return;
-    siz = nearestPowerOf2(siz);
+    if(siz <= oldSiz) {
+        if(data)
+            context->context->UpdateBuffer(
+                context->vertBuffer, 0U,
+                static_cast<int>(siz * sizeof(NVGvertex)), data,
+                DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    }
+    int bufSiz = nearestPowerOf2(siz);
 
     context->vertBuffer.Release();
     DE::BufferDesc bufferDesc = {};
     bufferDesc.BindFlags = DE::BIND_VERTEX_BUFFER;
     bufferDesc.Name = "NanoVG Vertex Buffer";
-    bufferDesc.uiSizeInBytes = siz * sizeof(NVGvertex);
+    bufferDesc.uiSizeInBytes = bufSiz * sizeof(NVGvertex);
     bufferDesc.Usage = DE::USAGE_DEFAULT;
     bufferDesc.CPUAccessFlags = DE::CPU_ACCESS_NONE;
-    // bufferDesc.Usage = DE::USAGE_DYNAMIC;
-    // bufferDesc.CPUAccessFlags = DE::CPU_ACCESS_WRITE;
 
-    context->device->CreateBuffer(bufferDesc, nullptr, &(context->vertBuffer));
+    DE::BufferData bdata = {};
+    bdata.DataSize = siz * sizeof(NVGvertex);
+    bdata.pData = data;
+
+    context->device->CreateBuffer(bufferDesc, data ? &bdata : nullptr,
+                                  &(context->vertBuffer));
 }
-static void prepareUniformBuffer(NVGDEContext* context, int siz) {
+static void prepareUniformBuffer(NVGDEContext* context, int siz,
+                                 const Uniform* data) {
     int oldSiz = context->uniformBuffer ?
         context->uniformBuffer->GetDesc().uiSizeInBytes / sizeof(Uniform) :
         0;
-    if(siz <= oldSiz)
-        return;
-    siz = nearestPowerOf2(siz);
+    if(siz <= oldSiz) {
+        if(data)
+            context->context->UpdateBuffer(
+                context->uniformBuffer, 0U,
+                static_cast<int>(siz * sizeof(Uniform)), data,
+                DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    }
+    int bufSiz = nearestPowerOf2(siz);
     {
         context->uniformBuffer.Release();
         context->uniformSRV.Release();
         DE::BufferDesc bufferDesc = {};
         bufferDesc.BindFlags = DE::BIND_SHADER_RESOURCE;
         bufferDesc.Name = "NanoVG Uniform Array";
-        bufferDesc.uiSizeInBytes = siz * sizeof(Uniform);
+        bufferDesc.uiSizeInBytes = bufSiz * sizeof(Uniform);
         bufferDesc.Usage = DE::USAGE_DEFAULT;
         bufferDesc.CPUAccessFlags = DE::CPU_ACCESS_NONE;
         bufferDesc.Mode = DE::BUFFER_MODE_STRUCTURED;
         bufferDesc.ElementByteStride = sizeof(Uniform);
 
-        context->device->CreateBuffer(bufferDesc, nullptr,
+        DE::BufferData bdata = {};
+        bdata.DataSize = siz * sizeof(Uniform);
+        bdata.pData = data;
+
+        context->device->CreateBuffer(bufferDesc, data ? &bdata : nullptr,
                                       &(context->uniformBuffer));
         context->uniformSRV = context->uniformBuffer->GetDefaultView(
             DE::BUFFER_VIEW_SHADER_RESOURCE);
@@ -421,18 +447,50 @@ static void prepareUniformBuffer(NVGDEContext* context, int siz) {
         DE::BufferDesc bufferDesc = {};
         bufferDesc.BindFlags = DE::BIND_VERTEX_BUFFER;
         bufferDesc.Name = "NanoVG Uniform Offset";
-        bufferDesc.uiSizeInBytes = siz * sizeof(int);
+        bufferDesc.uiSizeInBytes = bufSiz * sizeof(int);
         bufferDesc.Usage = DE::USAGE_STATIC;
 
-        std::vector<int> offset(siz);
+        std::vector<int> offset(bufSiz);
         std::iota(offset.begin(), offset.end(), 0);
-        DE::BufferData data = {};
-        data.DataSize = bufferDesc.uiSizeInBytes;
-        data.pData = offset.data();
+        DE::BufferData bdata = {};
+        bdata.DataSize = bufferDesc.uiSizeInBytes;
+        bdata.pData = offset.data();
 
-        context->device->CreateBuffer(bufferDesc, &data, &(context->uidBuffer));
+        context->device->CreateBuffer(bufferDesc, &bdata,
+                                      &(context->uidBuffer));
     }
+    for(auto& pipe : context->pipeline)
+        pipe.second.SRB.Release();
 }
+static void prepareIndirectCallBuffer(NVGDEContext* context, int siz,
+                                      const int* data) {
+    int oldSiz = context->indirectCall ?
+        context->indirectCall->GetDesc().uiSizeInBytes / sizeof(int) :
+        0;
+    if(siz <= oldSiz) {
+        if(data)
+            context->context->UpdateBuffer(
+                context->indirectCall, 0U, static_cast<int>(siz * sizeof(int)),
+                data, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    }
+    int bufSiz = nearestPowerOf2(siz);
+
+    context->indirectCall.Release();
+    DE::BufferDesc bufferDesc = {};
+    bufferDesc.BindFlags = DE::BIND_INDIRECT_DRAW_ARGS;
+    bufferDesc.Name = "NanoVG Indirect Draw Call Arguments";
+    bufferDesc.uiSizeInBytes = bufSiz * sizeof(int);
+    bufferDesc.Usage = DE::USAGE_DEFAULT;
+    bufferDesc.CPUAccessFlags = DE::CPU_ACCESS_NONE;
+
+    DE::BufferData bdata = {};
+    bdata.DataSize = siz * sizeof(int);
+    bdata.pData = data;
+
+    context->device->CreateBuffer(bufferDesc, data ? &bdata : nullptr,
+                                  &(context->indirectCall));
+}
+
 static DE::StaticSamplerDesc setSampler(int imageFlags) {
     DE::StaticSamplerDesc desc = {};
     desc.SamplerOrTextureName = "gTexture";
@@ -485,7 +543,6 @@ static int nvgde_renderCreate(void* uptr) {
             SDesc.BackFace.StencilFailOp = SDesc.BackFace.StencilPassOp =
                 DE::STENCIL_OP_KEEP;
     SDesc.StencilReadMask = SDesc.StencilWriteMask = 0xff;
-    context->context->SetStencilRef(0);
 
     SDesc.DepthEnable = false;
 
@@ -558,7 +615,6 @@ static int nvgde_renderCreate(void* uptr) {
             pipeline.PSO
                 ->GetStaticVariableByName(DE::SHADER_TYPE_VERTEX, "VSConstants")
                 ->Set(context->viewConstant);
-            pipeline.PSO->CreateShaderResourceBinding(&pipeline.SRB, true);
             return pipeline;
         });
 
@@ -571,8 +627,9 @@ static int nvgde_renderCreate(void* uptr) {
     nvgde_renderCreateTexture(uptr, NVG_TEXTURE_ALPHA, 1, 1, 0, &black);
 
     prepareTriangleFansIndexBuffer(context, 1024);
-    prepareVertexBuffer(context, 16384);
-    prepareUniformBuffer(context, 1024);
+    prepareVertexBuffer(context, 16384, nullptr);
+    prepareUniformBuffer(context, 1024, nullptr);
+    prepareIndirectCallBuffer(context, 4096, nullptr);
 
     context->pathBuffer.reserve(4096);
     context->calls.reserve(1024);
@@ -670,8 +727,10 @@ static void nvgde_renderCancel(void* uptr) {
     context->uniformBufferHost.clear();
 }
 
+enum class DrawMode { IndirectCallGen, IndirectCallCommit, DirectCall };
+
 static void nvgde_renderFlush(void* uptr) {
-    // TODO:batch/indirect draw/Multithreading
+    // TODO:batch/indirect draw/Multithreading/ResourceStateTransitionMode
 
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
     auto immediateContext = context->context;
@@ -684,22 +743,20 @@ static void nvgde_renderFlush(void* uptr) {
     auto&& stencilBack = depthStencil.BackFace;
     auto&& primitiveTopology = curState.GraphicsPipeline.PrimitiveTopology;
 
+    if(context->useIndirectDraw) {
+        //!!!
+    }
+
     {
         auto& vertBuf = context->vertBufferHost;
-        prepareVertexBuffer(context, static_cast<int>(vertBuf.size()));
-        immediateContext->UpdateBuffer(
-            context->vertBuffer, 0U,
-            static_cast<int>(vertBuf.size() * sizeof(NVGvertex)),
-            vertBuf.data(), DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        prepareVertexBuffer(context, static_cast<int>(vertBuf.size()),
+                            vertBuf.data());
     }
 
     {
         auto& uniBuf = context->uniformBufferHost;
-        prepareUniformBuffer(context, static_cast<int>(uniBuf.size()));
-        immediateContext->UpdateBuffer(
-            context->uniformBuffer, 0U,
-            static_cast<int>(uniBuf.size() * sizeof(Uniform)), uniBuf.data(),
-            DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        prepareUniformBuffer(context, static_cast<int>(uniBuf.size()),
+                             uniBuf.data());
     }
 
     {
@@ -726,10 +783,14 @@ static void nvgde_renderFlush(void* uptr) {
 
         NVGDEPipelineState& pipeline = context->pipeline.get(curState);
 
+        if(!pipeline.SRB) {
+            pipeline.PSO->CreateShaderResourceBinding(&pipeline.SRB, true);
+            pipeline.SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gUniform")
+                ->Set(context->uniformSRV);
+        }
+
         pipeline.SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gTexture")
             ->Set(tex.texView);
-        pipeline.SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gUniform")
-            ->Set(context->uniformSRV);
 
         immediateContext->SetPipelineState(pipeline.PSO);
         immediateContext->CommitShaderResources(
@@ -831,7 +892,7 @@ static void nvgde_renderFlush(void* uptr) {
             blend.DestBlendAlpha = bf.dstAlpha;
         }
         switch(call.type) {
-            case Type::fill: {
+            case Type::Fill: {
                 // Draw shapes
                 depthStencil.StencilEnable = true;
                 setStencil(DE::COMPARISON_FUNC_ALWAYS, DE::STENCIL_OP_KEEP,
@@ -866,14 +927,14 @@ static void nvgde_renderFlush(void* uptr) {
 
                 depthStencil.StencilEnable = false;
             } break;
-            case Type::convexFill: {
+            case Type::ConvexFill: {
 
                 // Notice:draw order
                 drawFans(call, call.image, call.uniform[0]);
 
                 drawStroke(call, call.image, call.uniform[0]);
             } break;
-            case Type::stroke: {
+            case Type::Stroke: {
                 if(context->flags & NVG_STENCIL_STROKES) {
                     depthStencil.StencilEnable = true;
 
@@ -905,7 +966,7 @@ static void nvgde_renderFlush(void* uptr) {
                     drawStroke(call, call.image, call.uniform[0]);
                 }
             } break;
-            case Type::triangles: {
+            case Type::Triangles: {
                 drawTriangle(call, call.image,
                              DE::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
                              call.uniform[0]);
@@ -1087,13 +1148,13 @@ static void nvgde_renderFill(void* uptr, NVGpaint* paint,
 
     NVGDECall call = {};
 
-    call.type = Type::fill;
+    call.type = Type::Fill;
     call.triangleCount = 4;
     call.image = paint->image;
     call.blendFactor = castBlendFactor(compositeOperation);
 
     if(npaths == 1 && paths[0].convex) {
-        call.type = Type::convexFill;
+        call.type = Type::ConvexFill;
         call.triangleCount = 0;
         // Bounding box fill quad not needed for convex fill
     }
@@ -1116,7 +1177,7 @@ static void nvgde_renderFill(void* uptr, NVGpaint* paint,
     }
 
     // Setup uniforms for draw calls
-    if(call.type == Type::fill) {
+    if(call.type == Type::Fill) {
         // Quad
         auto& vertBuf = context->vertBufferHost;
         call.triangleOffset = static_cast<int>(vertBuf.size());
@@ -1153,7 +1214,7 @@ static void nvgde_renderStroke(void* uptr, NVGpaint* paint,
 
     NVGDECall call = {};
 
-    call.type = Type::stroke;
+    call.type = Type::Stroke;
     call.image = paint->image;
     call.blendFactor = castBlendFactor(compositeOperation);
 
@@ -1196,7 +1257,7 @@ static void nvgde_renderTriangles(void* uptr, NVGpaint* paint,
 
     NVGDECall call = {};
 
-    call.type = Type::triangles;
+    call.type = Type::Triangles;
     call.image = paint->image;
     call.blendFactor = castBlendFactor(compositeOperation);
 

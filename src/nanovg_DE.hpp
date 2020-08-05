@@ -32,7 +32,8 @@ namespace DE = Diligent;
 enum NVGCreateFlags {
     NVG_ANTIALIAS = 1 << 0,
     NVG_STENCIL_STROKES = 1 << 1,
-    NVG_DEBUG = 1 << 2
+    NVG_DEBUG = 1 << 2,
+    NVG_ALLOW_INDIRECT_RENDERING = 1 << 3
 };
 
 NVGcontext* nvgCreateDE(DE::IRenderDevice* device, DE::IDeviceContext* context,

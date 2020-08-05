@@ -137,9 +137,11 @@ struct NVGDEPath {
 struct NVGDECall final {
     Type type;
     int image, triangleOffset, triangleCount, pathOffset, pathCount;
-    int drawIndirectOffset[3];
     int uniform[2];
     BlendFactor blendFactor;
+
+    int drawIndirectOffset[3];
+    int drawIndirectCount[3];
 };
 
 struct StateHasher final {
@@ -384,111 +386,101 @@ static void prepareVertexBuffer(NVGDEContext* context, int siz,
     int oldSiz = context->vertBuffer ?
         context->vertBuffer->GetDesc().uiSizeInBytes / sizeof(NVGvertex) :
         0;
-    if(siz <= oldSiz) {
-        if(data)
-            context->context->UpdateBuffer(
-                context->vertBuffer, 0U,
-                static_cast<int>(siz * sizeof(NVGvertex)), data,
-                DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    if(siz > oldSiz) {
+        int bufSiz = nearestPowerOf2(siz);
+
+        context->vertBuffer.Release();
+        DE::BufferDesc bufferDesc = {};
+        bufferDesc.BindFlags = DE::BIND_VERTEX_BUFFER;
+        bufferDesc.Name = "NanoVG Vertex Buffer";
+        bufferDesc.uiSizeInBytes = bufSiz * sizeof(NVGvertex);
+        bufferDesc.Usage = DE::USAGE_DEFAULT;
+        bufferDesc.CPUAccessFlags = DE::CPU_ACCESS_NONE;
+
+        context->device->CreateBuffer(bufferDesc, nullptr,
+                                      &(context->vertBuffer));
     }
-    int bufSiz = nearestPowerOf2(siz);
 
-    context->vertBuffer.Release();
-    DE::BufferDesc bufferDesc = {};
-    bufferDesc.BindFlags = DE::BIND_VERTEX_BUFFER;
-    bufferDesc.Name = "NanoVG Vertex Buffer";
-    bufferDesc.uiSizeInBytes = bufSiz * sizeof(NVGvertex);
-    bufferDesc.Usage = DE::USAGE_DEFAULT;
-    bufferDesc.CPUAccessFlags = DE::CPU_ACCESS_NONE;
-
-    DE::BufferData bdata = {};
-    bdata.DataSize = siz * sizeof(NVGvertex);
-    bdata.pData = data;
-
-    context->device->CreateBuffer(bufferDesc, data ? &bdata : nullptr,
-                                  &(context->vertBuffer));
+    if(data) {
+        context->context->UpdateBuffer(
+            context->vertBuffer, 0U, static_cast<int>(siz * sizeof(NVGvertex)),
+            data, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    }
 }
 static void prepareUniformBuffer(NVGDEContext* context, int siz,
                                  const Uniform* data) {
     int oldSiz = context->uniformBuffer ?
         context->uniformBuffer->GetDesc().uiSizeInBytes / sizeof(Uniform) :
         0;
-    if(siz <= oldSiz) {
-        if(data)
-            context->context->UpdateBuffer(
-                context->uniformBuffer, 0U,
-                static_cast<int>(siz * sizeof(Uniform)), data,
-                DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    if(siz > oldSiz) {
+        int bufSiz = nearestPowerOf2(siz);
+        {
+            context->uniformBuffer.Release();
+            context->uniformSRV.Release();
+            DE::BufferDesc bufferDesc = {};
+            bufferDesc.BindFlags = DE::BIND_SHADER_RESOURCE;
+            bufferDesc.Name = "NanoVG Uniform Array";
+            bufferDesc.uiSizeInBytes = bufSiz * sizeof(Uniform);
+            bufferDesc.Usage = DE::USAGE_DEFAULT;
+            bufferDesc.CPUAccessFlags = DE::CPU_ACCESS_NONE;
+            bufferDesc.Mode = DE::BUFFER_MODE_STRUCTURED;
+            bufferDesc.ElementByteStride = sizeof(Uniform);
+
+            context->device->CreateBuffer(bufferDesc, nullptr,
+                                          &(context->uniformBuffer));
+            context->uniformSRV = context->uniformBuffer->GetDefaultView(
+                DE::BUFFER_VIEW_SHADER_RESOURCE);
+        }
+        {
+            context->uidBuffer.Release();
+            DE::BufferDesc bufferDesc = {};
+            bufferDesc.BindFlags = DE::BIND_VERTEX_BUFFER;
+            bufferDesc.Name = "NanoVG Uniform Offset";
+            bufferDesc.uiSizeInBytes = bufSiz * sizeof(int);
+            bufferDesc.Usage = DE::USAGE_STATIC;
+
+            std::vector<int> offset(bufSiz);
+            std::iota(offset.begin(), offset.end(), 0);
+            DE::BufferData bdata = {};
+            bdata.DataSize = bufferDesc.uiSizeInBytes;
+            bdata.pData = offset.data();
+
+            context->device->CreateBuffer(bufferDesc, &bdata,
+                                          &(context->uidBuffer));
+        }
+        for(auto& pipe : context->pipeline)
+            pipe.second.SRB.Release();
     }
-    int bufSiz = nearestPowerOf2(siz);
-    {
-        context->uniformBuffer.Release();
-        context->uniformSRV.Release();
-        DE::BufferDesc bufferDesc = {};
-        bufferDesc.BindFlags = DE::BIND_SHADER_RESOURCE;
-        bufferDesc.Name = "NanoVG Uniform Array";
-        bufferDesc.uiSizeInBytes = bufSiz * sizeof(Uniform);
-        bufferDesc.Usage = DE::USAGE_DEFAULT;
-        bufferDesc.CPUAccessFlags = DE::CPU_ACCESS_NONE;
-        bufferDesc.Mode = DE::BUFFER_MODE_STRUCTURED;
-        bufferDesc.ElementByteStride = sizeof(Uniform);
 
-        DE::BufferData bdata = {};
-        bdata.DataSize = siz * sizeof(Uniform);
-        bdata.pData = data;
-
-        context->device->CreateBuffer(bufferDesc, data ? &bdata : nullptr,
-                                      &(context->uniformBuffer));
-        context->uniformSRV = context->uniformBuffer->GetDefaultView(
-            DE::BUFFER_VIEW_SHADER_RESOURCE);
-    }
-    {
-        context->uidBuffer.Release();
-        DE::BufferDesc bufferDesc = {};
-        bufferDesc.BindFlags = DE::BIND_VERTEX_BUFFER;
-        bufferDesc.Name = "NanoVG Uniform Offset";
-        bufferDesc.uiSizeInBytes = bufSiz * sizeof(int);
-        bufferDesc.Usage = DE::USAGE_STATIC;
-
-        std::vector<int> offset(bufSiz);
-        std::iota(offset.begin(), offset.end(), 0);
-        DE::BufferData bdata = {};
-        bdata.DataSize = bufferDesc.uiSizeInBytes;
-        bdata.pData = offset.data();
-
-        context->device->CreateBuffer(bufferDesc, &bdata,
-                                      &(context->uidBuffer));
-    }
-    for(auto& pipe : context->pipeline)
-        pipe.second.SRB.Release();
+    if(data)
+        context->context->UpdateBuffer(
+            context->uniformBuffer, 0U, static_cast<int>(siz * sizeof(Uniform)),
+            data, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
 }
 static void prepareIndirectCallBuffer(NVGDEContext* context, int siz,
-                                      const int* data) {
+                                      const DE::Uint32* data) {
     int oldSiz = context->indirectCall ?
-        context->indirectCall->GetDesc().uiSizeInBytes / sizeof(int) :
+        context->indirectCall->GetDesc().uiSizeInBytes / sizeof(DE::Uint32) :
         0;
-    if(siz <= oldSiz) {
-        if(data)
-            context->context->UpdateBuffer(
-                context->indirectCall, 0U, static_cast<int>(siz * sizeof(int)),
-                data, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    if(siz > oldSiz) {
+        int bufSiz = nearestPowerOf2(siz);
+
+        context->indirectCall.Release();
+        DE::BufferDesc bufferDesc = {};
+        bufferDesc.BindFlags = DE::BIND_INDIRECT_DRAW_ARGS;
+        bufferDesc.Name = "NanoVG Indirect Draw Call Arguments";
+        bufferDesc.uiSizeInBytes = bufSiz * sizeof(DE::Uint32);
+        bufferDesc.Usage = DE::USAGE_DEFAULT;
+        bufferDesc.CPUAccessFlags = DE::CPU_ACCESS_NONE;
+
+        context->device->CreateBuffer(bufferDesc, nullptr,
+                                      &(context->indirectCall));
     }
-    int bufSiz = nearestPowerOf2(siz);
-
-    context->indirectCall.Release();
-    DE::BufferDesc bufferDesc = {};
-    bufferDesc.BindFlags = DE::BIND_INDIRECT_DRAW_ARGS;
-    bufferDesc.Name = "NanoVG Indirect Draw Call Arguments";
-    bufferDesc.uiSizeInBytes = bufSiz * sizeof(int);
-    bufferDesc.Usage = DE::USAGE_DEFAULT;
-    bufferDesc.CPUAccessFlags = DE::CPU_ACCESS_NONE;
-
-    DE::BufferData bdata = {};
-    bdata.DataSize = siz * sizeof(int);
-    bdata.pData = data;
-
-    context->device->CreateBuffer(bufferDesc, data ? &bdata : nullptr,
-                                  &(context->indirectCall));
+    if(data)
+        context->context->UpdateBuffer(
+            context->indirectCall, 0U,
+            static_cast<int>(siz * sizeof(DE::Uint32)), data,
+            DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
 }
 
 static DE::StaticSamplerDesc setSampler(int imageFlags) {
@@ -730,7 +722,7 @@ static void nvgde_renderCancel(void* uptr) {
 enum class DrawMode { IndirectCallGen, IndirectCallCommit, DirectCall };
 
 static void nvgde_renderFlush(void* uptr) {
-    // TODO:batch/indirect draw/Multithreading/ResourceStateTransitionMode
+    // TODO:batch/multi indirect draw/Multithreading/ResourceStateTransitionMode
 
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
     auto immediateContext = context->context;
@@ -743,28 +735,29 @@ static void nvgde_renderFlush(void* uptr) {
     auto&& stencilBack = depthStencil.BackFace;
     auto&& primitiveTopology = curState.GraphicsPipeline.PrimitiveTopology;
 
-    if(context->useIndirectDraw) {
-        //!!!
-    }
-
+    // prepare buffer
     {
         auto& vertBuf = context->vertBufferHost;
         prepareVertexBuffer(context, static_cast<int>(vertBuf.size()),
                             vertBuf.data());
-    }
-
-    {
         auto& uniBuf = context->uniformBufferHost;
         prepareUniformBuffer(context, static_cast<int>(uniBuf.size()),
                              uniBuf.data());
-    }
-
-    {
         int maxFillCount = 0;
         for(const auto& path : context->pathBuffer) {
             maxFillCount = std::max(path.fillCount, maxFillCount);
         }
         prepareTriangleFansIndexBuffer(context, maxFillCount - 2);
+    }
+
+    // set state
+    immediateContext->SetStencilRef(0);
+    {
+        DE::IBuffer* buf[2] = { context->vertBuffer, context->uidBuffer };
+        DE::Uint32 voff[2] = { 0, 0 };
+        immediateContext->SetVertexBuffers(
+            0, 2, buf, voff, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
+            DE::SET_VERTEX_BUFFERS_FLAG_RESET);
     }
 
     auto setStencil = [&](DE::COMPARISON_FUNCTION func, DE::STENCIL_OP sfail,
@@ -776,204 +769,318 @@ static void nvgde_renderFlush(void* uptr) {
         stencilFront.StencilPassOp = stencilBack.StencilPassOp = zpass;
     };
 
-    auto prepareRendering = [&](int image) {
-        auto&& tex = context->texture.get(image);
-
-        curState.ResourceLayout.NumStaticSamplers = tex.flags;
-
-        NVGDEPipelineState& pipeline = context->pipeline.get(curState);
-
-        if(!pipeline.SRB) {
-            pipeline.PSO->CreateShaderResourceBinding(&pipeline.SRB, true);
-            pipeline.SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gUniform")
-                ->Set(context->uniformSRV);
-        }
-
-        pipeline.SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gTexture")
-            ->Set(tex.texView);
-
-        immediateContext->SetPipelineState(pipeline.PSO);
-        immediateContext->CommitShaderResources(
-            pipeline.SRB, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    std::vector<DE::Uint32> indirectBuffer;
+    auto pushIndirect = [&](const DE::DrawAttribs& DA) {
+        indirectBuffer.insert(indirectBuffer.cend(),
+                              { DA.NumVertices, DA.NumInstances,
+                                DA.StartVertexLocation,
+                                DA.FirstInstanceLocation });
+    };
+    auto pushIndirectIndex = [&](const DE::DrawIndexedAttribs& DIA) {
+        indirectBuffer.insert(indirectBuffer.cend(),
+                              { DIA.NumIndices, DIA.NumInstances,
+                                DIA.FirstIndexLocation, DIA.BaseVertex,
+                                DIA.FirstInstanceLocation });
     };
 
-    auto drawStroke = [&](const NVGDECall& call, int image, int uniform) {
-        if(std::none_of(
-               context->pathBuffer.cbegin() + call.pathOffset,
-               context->pathBuffer.cbegin() + call.pathOffset + call.pathCount,
-               [](const NVGDEPath& path) { return path.strokeCount > 0; }))
-            return;
-        primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-        prepareRendering(image);
-        bool used = false;
-        for(int i = 0; i < call.pathCount; ++i) {
-            const auto& path = context->pathBuffer[call.pathOffset + i];
-            if(path.strokeCount > 0) {
-                DE::DrawAttribs DA = {};
-                DA.NumVertices = path.strokeCount;
-                DA.StartVertexLocation = path.strokeOffset;
-                DA.FirstInstanceLocation = uniform;
-                if(context->flags & NVGCreateFlags::NVG_DEBUG)
-                    DA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
-                if(used)
-                    DA.Flags |= DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
-                else
-                    used = true;
-                immediateContext->Draw(DA);
+    auto draw = [&](DrawMode mode) {
+        auto prepareRendering = [&](int image) {
+            if(mode == DrawMode::IndirectCallGen)
+                return;
+            auto&& tex = context->texture.get(image);
+
+            curState.ResourceLayout.NumStaticSamplers = tex.flags;
+
+            NVGDEPipelineState& pipeline = context->pipeline.get(curState);
+
+            if(!pipeline.SRB) {
+                pipeline.PSO->CreateShaderResourceBinding(&pipeline.SRB, true);
+                pipeline.SRB
+                    ->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gUniform")
+                    ->Set(context->uniformSRV);
             }
-        }
-    };
 
-    auto drawFans = [&](const NVGDECall& call, int image, int uniform) {
-        if(std::none_of(
-               context->pathBuffer.cbegin() + call.pathOffset,
-               context->pathBuffer.cbegin() + call.pathOffset + call.pathCount,
-               [](const NVGDEPath& path) { return path.fillCount > 2; }))
-            return;
-        primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            pipeline.SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gTexture")
+                ->Set(tex.texView);
 
-        immediateContext->SetIndexBuffer(
-            context->triangleFansIndex, 0U,
-            DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+            immediateContext->SetPipelineState(pipeline.PSO);
+            immediateContext->CommitShaderResources(
+                pipeline.SRB, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        };
 
-        prepareRendering(image);
-        bool used = false;
-        for(int i = 0; i < call.pathCount; ++i) {
-            const auto& path = context->pathBuffer[call.pathOffset + i];
-            if(path.fillCount > 2) {
-                DE::DrawIndexedAttribs DIA = {};
-                DIA.FirstInstanceLocation = uniform;
-                DIA.BaseVertex = path.fillOffset;
-                DIA.IndexType = DE::VT_UINT32;
-                DIA.NumIndices =
-                    3U * static_cast<DE::Uint32>(path.fillCount - 2);
+        auto drawStroke = [&](NVGDECall& call, int image, int uniform,
+                              int callID) {
+            int cnt = static_cast<int>(std::count_if(
+                context->pathBuffer.cbegin() + call.pathOffset,
+                context->pathBuffer.cbegin() + call.pathOffset + call.pathCount,
+                [](const NVGDEPath& path) { return path.strokeCount > 0; }));
+
+            if(cnt == 0)
+                return;
+            primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+            prepareRendering(image);
+
+            if(mode == DrawMode::IndirectCallCommit) {
+                bool used = false;
+                for(int i = 0; i < call.drawIndirectCount[callID]; ++i) {
+                    DE::DrawIndirectAttribs DIA = {};
+                    if(context->flags & NVG_DEBUG)
+                        DIA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
+                    if(used)
+                        DIA.Flags |=
+                            DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
+                    else
+                        used = true;
+                    DIA.IndirectAttribsBufferStateTransitionMode =
+                        DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION;
+                    DIA.IndirectDrawArgsOffset = sizeof(DE::Uint32) *
+                        (call.drawIndirectOffset[callID] + i * 4);
+                    immediateContext->DrawIndirect(DIA, context->indirectCall);
+                }
+            } else {
+                if(mode == DrawMode::IndirectCallGen) {
+                    call.drawIndirectOffset[callID] =
+                        static_cast<int>(indirectBuffer.size());
+                    call.drawIndirectCount[callID] = cnt;
+                }
+
+                bool used = false;
+                for(int i = 0; i < call.pathCount; ++i) {
+                    const auto& path = context->pathBuffer[call.pathOffset + i];
+                    if(path.strokeCount > 0) {
+                        DE::DrawAttribs DA = {};
+                        DA.NumVertices = path.strokeCount;
+                        DA.StartVertexLocation = path.strokeOffset;
+                        DA.FirstInstanceLocation = uniform;
+                        if(context->flags & NVGCreateFlags::NVG_DEBUG)
+                            DA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
+                        if(used)
+                            DA.Flags |=
+                                DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
+                        else
+                            used = true;
+                        if(mode == DrawMode::IndirectCallGen)
+                            pushIndirect(DA);
+                        else
+                            immediateContext->Draw(DA);
+                    }
+                }
+            }
+        };
+
+        auto drawFans = [&](NVGDECall& call, int image, int uniform,
+                            int callID) {
+            int cnt = static_cast<int>(std::count_if(
+                context->pathBuffer.cbegin() + call.pathOffset,
+                context->pathBuffer.cbegin() + call.pathOffset + call.pathCount,
+                [](const NVGDEPath& path) { return path.fillCount > 2; }));
+
+            if(cnt == 0)
+                return;
+
+            primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+            if(mode != DrawMode::IndirectCallGen)
+                immediateContext->SetIndexBuffer(
+                    context->triangleFansIndex, 0U,
+                    DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+
+            prepareRendering(image);
+
+            if(mode == DrawMode::IndirectCallCommit) {
+                bool used = false;
+                for(int i = 0; i < call.drawIndirectCount[callID]; ++i) {
+                    DE::DrawIndexedIndirectAttribs DIIA = {};
+                    DIIA.IndexType = DE::VT_UINT32;
+                    if(context->flags & NVG_DEBUG)
+                        DIIA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
+                    if(used)
+                        DIIA.Flags |=
+                            DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
+                    else
+                        used = true;
+                    DIIA.IndirectAttribsBufferStateTransitionMode =
+                        DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION;
+                    DIIA.IndirectDrawArgsOffset = sizeof(DE::Uint32) *
+                        (call.drawIndirectOffset[callID] + i * 5);
+                    immediateContext->DrawIndexedIndirect(
+                        DIIA, context->indirectCall);
+                }
+            } else {
+                if(mode == DrawMode::IndirectCallGen) {
+                    call.drawIndirectOffset[callID] =
+                        static_cast<int>(indirectBuffer.size());
+                    call.drawIndirectCount[callID] = cnt;
+                }
+
+                bool used = false;
+                for(int i = 0; i < call.pathCount; ++i) {
+                    const auto& path = context->pathBuffer[call.pathOffset + i];
+                    if(path.fillCount > 2) {
+                        DE::DrawIndexedAttribs DIA = {};
+                        DIA.FirstInstanceLocation = uniform;
+                        DIA.BaseVertex = path.fillOffset;
+                        DIA.IndexType = DE::VT_UINT32;
+                        DIA.NumIndices =
+                            3U * static_cast<DE::Uint32>(path.fillCount - 2);
+                        if(context->flags & NVGCreateFlags::NVG_DEBUG)
+                            DIA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
+                        if(used)
+                            DIA.Flags |=
+                                DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
+                        else
+                            used = true;
+                        if(mode == DrawMode::IndirectCallGen)
+                            pushIndirectIndex(DIA);
+                        else
+                            immediateContext->DrawIndexed(DIA);
+                    }
+                }
+            }
+        };
+
+        auto drawTriangle = [&](NVGDECall& call, int image,
+                                DE::PRIMITIVE_TOPOLOGY pt, int uniform,
+                                int callID) {
+            if(call.triangleCount == 0)
+                return;
+            primitiveTopology = pt;
+            prepareRendering(image);
+
+            if(mode == DrawMode::IndirectCallCommit) {
+                DE::DrawIndirectAttribs DIA = {};
                 if(context->flags & NVGCreateFlags::NVG_DEBUG)
                     DIA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
-                if(used)
-                    DIA.Flags |= DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
-                else
-                    used = true;
-                immediateContext->DrawIndexed(DIA);
+                DIA.IndirectAttribsBufferStateTransitionMode =
+                    DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION;
+                DIA.IndirectDrawArgsOffset =
+                    sizeof(DE::Uint32) * call.drawIndirectOffset[callID];
+                immediateContext->DrawIndirect(DIA, context->indirectCall);
+            } else {
+                DE::DrawAttribs DA = {};
+                DA.FirstInstanceLocation = uniform;
+                DA.NumVertices = call.triangleCount;
+                DA.StartVertexLocation = call.triangleOffset;
+                if(context->flags & NVGCreateFlags::NVG_DEBUG)
+                    DA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
+                if(mode == DrawMode::DirectCall)
+                    immediateContext->Draw(DA);
+                else {
+                    call.drawIndirectOffset[callID] =
+                        static_cast<int>(indirectBuffer.size());
+                    pushIndirect(DA);
+                }
+            }
+        };
+
+        for(auto& call : context->calls) {
+            // setBlend
+            {
+                auto&& bf = call.blendFactor;
+                blend.SrcBlend = bf.srcRGB;
+                blend.SrcBlendAlpha = bf.srcAlpha;
+                blend.DestBlend = bf.dstRGB;
+                blend.DestBlendAlpha = bf.dstAlpha;
+            }
+            switch(call.type) {
+                case Type::Fill: {
+                    // Draw shapes
+                    depthStencil.StencilEnable = true;
+                    setStencil(DE::COMPARISON_FUNC_ALWAYS, DE::STENCIL_OP_KEEP,
+                               DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP);
+                    blend.RenderTargetWriteMask = 0;
+
+                    // set bindpoint for solid loc
+
+                    stencilFront.StencilPassOp = DE::STENCIL_OP_INCR_WRAP;
+                    stencilBack.StencilPassOp = DE::STENCIL_OP_DECR_WRAP;
+                    rasterizer.CullMode = DE::CULL_MODE_NONE;
+
+                    drawFans(call, 0, call.uniform[0], 0);
+                    rasterizer.CullMode = DE::CULL_MODE_BACK;
+
+                    // Draw anti-aliased pixels
+                    blend.RenderTargetWriteMask = DE::COLOR_MASK_ALL;
+
+                    if(context->flags & NVGCreateFlags::NVG_ANTIALIAS) {
+                        setStencil(DE::COMPARISON_FUNC_EQUAL,
+                                   DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP,
+                                   DE::STENCIL_OP_KEEP);
+                        // Draw fringes
+                        drawStroke(call, call.image, call.uniform[1], 1);
+                    }
+
+                    // Draw fill
+                    setStencil(DE::COMPARISON_FUNC_NOT_EQUAL,
+                               DE::STENCIL_OP_ZERO, DE::STENCIL_OP_ZERO,
+                               DE::STENCIL_OP_ZERO);
+                    drawTriangle(call, call.image,
+                                 DE::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+                                 call.uniform[1], 2);
+
+                    depthStencil.StencilEnable = false;
+                } break;
+                case Type::ConvexFill: {
+
+                    // Notice:draw order
+                    drawFans(call, call.image, call.uniform[0], 0);
+
+                    drawStroke(call, call.image, call.uniform[0], 1);
+                } break;
+                case Type::Stroke: {
+                    if(context->flags & NVG_STENCIL_STROKES) {
+                        depthStencil.StencilEnable = true;
+
+                        // Fill the stroke base without overlap
+                        setStencil(DE::COMPARISON_FUNC_EQUAL,
+                                   DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP,
+                                   DE::STENCIL_OP_INCR_SAT);
+
+                        drawStroke(call, call.image, call.uniform[1], 0);
+
+                        // Draw anti-aliased pixels.
+
+                        setStencil(DE::COMPARISON_FUNC_EQUAL,
+                                   DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP,
+                                   DE::STENCIL_OP_KEEP);
+
+                        drawStroke(call, call.image, call.uniform[0], 1);
+
+                        // Clear stencil buffer.
+                        blend.RenderTargetWriteMask = 0;
+
+                        setStencil(DE::COMPARISON_FUNC_ALWAYS,
+                                   DE::STENCIL_OP_ZERO, DE::STENCIL_OP_ZERO,
+                                   DE::STENCIL_OP_ZERO);
+                        drawStroke(call, call.image, call.uniform[0], 2);
+
+                        blend.RenderTargetWriteMask = DE::COLOR_MASK_ALL;
+
+                        depthStencil.StencilEnable = false;
+                    } else {
+                        // Draw Strokes
+                        drawStroke(call, call.image, call.uniform[0], 0);
+                    }
+                } break;
+                case Type::Triangles: {
+                    drawTriangle(call, call.image,
+                                 DE::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                                 call.uniform[0], 0);
+                } break;
+                default:
+                    break;
             }
         }
     };
 
-    auto drawTriangle = [&](const NVGDECall& call, int image,
-                            DE::PRIMITIVE_TOPOLOGY pt, int uniform) {
-        if(call.triangleCount == 0)
-            return;
-        primitiveTopology = pt;
-        prepareRendering(image);
-        DE::DrawAttribs DA = {};
-        DA.FirstInstanceLocation = uniform;
-        DA.NumVertices = call.triangleCount;
-        DA.StartVertexLocation = call.triangleOffset;
-        if(context->flags & NVGCreateFlags::NVG_DEBUG)
-            DA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
-        immediateContext->Draw(DA);
-    };
-
-    immediateContext->SetStencilRef(0);
-    {
-        DE::IBuffer* buf[2] = { context->vertBuffer, context->uidBuffer };
-        DE::Uint32 voff[2] = { 0, 0 };
-        immediateContext->SetVertexBuffers(
-            0, 2, buf, voff, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
-            DE::SET_VERTEX_BUFFERS_FLAG_RESET);
-    }
-
-    for(const auto& call : context->calls) {
-        // setBlend
-        {
-            auto&& bf = call.blendFactor;
-            blend.SrcBlend = bf.srcRGB;
-            blend.SrcBlendAlpha = bf.srcAlpha;
-            blend.DestBlend = bf.dstRGB;
-            blend.DestBlendAlpha = bf.dstAlpha;
-        }
-        switch(call.type) {
-            case Type::Fill: {
-                // Draw shapes
-                depthStencil.StencilEnable = true;
-                setStencil(DE::COMPARISON_FUNC_ALWAYS, DE::STENCIL_OP_KEEP,
-                           DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP);
-                blend.RenderTargetWriteMask = 0;
-
-                // set bindpoint for solid loc
-
-                stencilFront.StencilPassOp = DE::STENCIL_OP_INCR_WRAP;
-                stencilBack.StencilPassOp = DE::STENCIL_OP_DECR_WRAP;
-                rasterizer.CullMode = DE::CULL_MODE_NONE;
-
-                drawFans(call, 0, call.uniform[0]);
-                rasterizer.CullMode = DE::CULL_MODE_BACK;
-
-                // Draw anti-aliased pixels
-                blend.RenderTargetWriteMask = DE::COLOR_MASK_ALL;
-
-                if(context->flags & NVGCreateFlags::NVG_ANTIALIAS) {
-                    setStencil(DE::COMPARISON_FUNC_EQUAL, DE::STENCIL_OP_KEEP,
-                               DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP);
-                    // Draw fringes
-                    drawStroke(call, call.image, call.uniform[1]);
-                }
-
-                // Draw fill
-                setStencil(DE::COMPARISON_FUNC_NOT_EQUAL, DE::STENCIL_OP_ZERO,
-                           DE::STENCIL_OP_ZERO, DE::STENCIL_OP_ZERO);
-                drawTriangle(call, call.image,
-                             DE::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
-                             call.uniform[1]);
-
-                depthStencil.StencilEnable = false;
-            } break;
-            case Type::ConvexFill: {
-
-                // Notice:draw order
-                drawFans(call, call.image, call.uniform[0]);
-
-                drawStroke(call, call.image, call.uniform[0]);
-            } break;
-            case Type::Stroke: {
-                if(context->flags & NVG_STENCIL_STROKES) {
-                    depthStencil.StencilEnable = true;
-
-                    // Fill the stroke base without overlap
-                    setStencil(DE::COMPARISON_FUNC_EQUAL, DE::STENCIL_OP_KEEP,
-                               DE::STENCIL_OP_KEEP, DE::STENCIL_OP_INCR_SAT);
-
-                    drawStroke(call, call.image, call.uniform[1]);
-
-                    // Draw anti-aliased pixels.
-
-                    setStencil(DE::COMPARISON_FUNC_EQUAL, DE::STENCIL_OP_KEEP,
-                               DE::STENCIL_OP_KEEP, DE::STENCIL_OP_KEEP);
-
-                    drawStroke(call, call.image, call.uniform[0]);
-
-                    // Clear stencil buffer.
-                    blend.RenderTargetWriteMask = 0;
-
-                    setStencil(DE::COMPARISON_FUNC_ALWAYS, DE::STENCIL_OP_ZERO,
-                               DE::STENCIL_OP_ZERO, DE::STENCIL_OP_ZERO);
-                    drawStroke(call, call.image, call.uniform[0]);
-
-                    blend.RenderTargetWriteMask = DE::COLOR_MASK_ALL;
-
-                    depthStencil.StencilEnable = false;
-                } else {
-                    // Draw Strokes
-                    drawStroke(call, call.image, call.uniform[0]);
-                }
-            } break;
-            case Type::Triangles: {
-                drawTriangle(call, call.image,
-                             DE::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-                             call.uniform[0]);
-            } break;
-            default:
-                break;
-        }
+    if(context->useIndirectDraw) {
+        draw(DrawMode::IndirectCallGen);
+        prepareIndirectCallBuffer(context,
+                                  static_cast<int>(indirectBuffer.size()),
+                                  indirectBuffer.data());
+        draw(DrawMode::IndirectCallCommit);
+    } else {
+        draw(DrawMode::DirectCall);
     }
 
     nvgde_renderCancel(uptr);
@@ -1296,7 +1403,14 @@ NVGcontext* nvgCreateDE(DE::IRenderDevice* device, DE::IDeviceContext* context,
     ptr->depthFormat = depthFormat;
     ptr->flags = flags;
 
-    ptr->useIndirectDraw = device->GetDeviceCaps().Features.IndirectRendering;
+    if(flags & NVG_ALLOW_INDIRECT_RENDERING) {
+        ptr->useIndirectDraw =
+            device->GetDeviceCaps().Features.IndirectRendering;
+        CHECK_WARN(ptr->useIndirectDraw,
+                   "Indirect Rendering is not supported by this device.Use "
+                   "direct call.");
+    } else
+        ptr->useIndirectDraw = false;
 
     NVGparams params = {};
     params.edgeAntiAlias = (flags & NVGCreateFlags::NVG_ANTIALIAS);

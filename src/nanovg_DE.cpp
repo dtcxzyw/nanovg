@@ -722,7 +722,7 @@ static void nvgde_renderCancel(void* uptr) {
 enum class DrawMode { IndirectCallGen, IndirectCallCommit, DirectCall };
 
 static void nvgde_renderFlush(void* uptr) {
-    // TODO:batch/Multithreading/explicitly transitions all resources
+    // TODO:batch/Multithreading/reduce GL state change
 
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
     auto immediateContext = context->context;
@@ -795,13 +795,14 @@ static void nvgde_renderFlush(void* uptr) {
 
             if(!pipeline.SRB) {
                 pipeline.PSO->CreateShaderResourceBinding(&pipeline.SRB, true);
-                pipeline.SRB
-                    ->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gUniform")
-                    ->Set(context->uniformSRV);
+                auto uniVar = pipeline.SRB->GetVariableByName(
+                    DE::SHADER_TYPE_PIXEL, "gUniform");
+                uniVar->Set(context->uniformSRV);
             }
 
-            pipeline.SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL, "gTexture")
-                ->Set(tex.texView);
+            auto texVar = pipeline.SRB->GetVariableByName(DE::SHADER_TYPE_PIXEL,
+                                                          "gTexture");
+            texVar->Set(tex.texView);
 
             immediateContext->SetPipelineState(pipeline.PSO);
             immediateContext->CommitShaderResources(

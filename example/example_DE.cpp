@@ -222,6 +222,8 @@ public:
         // Set the desired number of samples
         colTexDesc.SampleCount = sampleCount;
         // Define optimal clear value
+        float col[4] = { 0.3f, 0.3f, 0.32f, 1.0f };
+        memcpy(colTexDesc.ClearValue.Color, col, sizeof(col));
         colTexDesc.ClearValue.Format = SCDesc.ColorBufferFormat;
         DE::RefCntAutoPtr<DE::ITexture> pColor;
         device->CreateTexture(colTexDesc, nullptr, &pColor);
@@ -398,7 +400,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
     ShowWindow(hwnd, cmdShow);
     UpdateWindow(hwnd);
 
-    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_D3D11);
+    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_GL);
 
     DemoData data;
     NVGcontext* vg = NULL;
@@ -432,7 +434,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
     vg = nvgCreateDE(
         gEngine->device, gEngine->immediateContext, msaa,
         SDesc.ColorBufferFormat, SDesc.DepthBufferFormat,
-        static_cast<int>((msaa.Count == 1 ? NVGCreateFlags::NVG_ANTIALIAS : 0)
+        static_cast<int>((msaa.Count == 1 ? NVGCreateFlags::NVG_ANTIALIAS : 0) |
+                         NVG_ALLOW_INDIRECT_RENDERING
     // | NVGCreateFlags::NVG_STENCIL_STROKES
 #ifdef _DEBUG
                          | NVGCreateFlags::NVG_DEBUG
@@ -541,12 +544,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
 
     {
         std::stringstream ss;
-        ss.precision(2);
+        ss.precision(5);
         ss << "Average Frame Time: " << (getGraphAverage(&fps) * 1000.0f)
            << " ms\n";
         ss << "          CPU Time: " << (getGraphAverage(&cpuGraph) * 1000.0f)
            << " ms\n";
-        ss << "          GPU Time: " << (getGraphAverage(&cpuGraph) * 1000.0f)
+        ss << "          GPU Time: " << (getGraphAverage(&gpuGraph) * 1000.0f)
            << " ms\n";
         std::string str = ss.str();
         OutputDebugStringA(str.c_str());

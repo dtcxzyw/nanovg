@@ -722,7 +722,7 @@ static void nvgde_renderCancel(void* uptr) {
 enum class DrawMode { IndirectCallGen, IndirectCallCommit, DirectCall };
 
 static void nvgde_renderFlush(void* uptr) {
-    // TODO:batch/multi indirect draw/Multithreading/ResourceStateTransitionMode
+    // TODO:batch/Multithreading/explicitly transitions all resources
 
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
     auto immediateContext = context->context;
@@ -815,28 +815,21 @@ static void nvgde_renderFlush(void* uptr) {
                 context->pathBuffer.cbegin() + call.pathOffset + call.pathCount,
                 [](const NVGDEPath& path) { return path.strokeCount > 0; }));
 
-            if(cnt == 0)
+            if(cnt == 0 || (mode == DrawMode::IndirectCallGen && cnt == 1))
                 return;
             primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
             prepareRendering(image);
 
-            if(mode == DrawMode::IndirectCallCommit) {
-                bool used = false;
-                for(int i = 0; i < call.drawIndirectCount[callID]; ++i) {
-                    DE::DrawIndirectAttribs DIA = {};
-                    if(context->flags & NVG_DEBUG)
-                        DIA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
-                    if(used)
-                        DIA.Flags |=
-                            DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
-                    else
-                        used = true;
-                    DIA.IndirectAttribsBufferStateTransitionMode =
-                        DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION;
-                    DIA.IndirectDrawArgsOffset = sizeof(DE::Uint32) *
-                        (call.drawIndirectOffset[callID] + i * 4);
-                    immediateContext->DrawIndirect(DIA, context->indirectCall);
-                }
+            if(mode == DrawMode::IndirectCallCommit && cnt > 1) {
+                DE::DrawIndirectAttribs DIA = {};
+                DIA.IndirectAttribsBufferStateTransitionMode =
+                    DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION;
+                if(context->flags & NVG_DEBUG)
+                    DIA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
+                DIA.IndirectDrawArgsOffset =
+                    sizeof(DE::Uint32) * call.drawIndirectOffset[callID];
+                immediateContext->MultiDrawIndirect(
+                    DIA, context->indirectCall, call.drawIndirectCount[callID]);
             } else {
                 if(mode == DrawMode::IndirectCallGen) {
                     call.drawIndirectOffset[callID] =
@@ -844,25 +837,22 @@ static void nvgde_renderFlush(void* uptr) {
                     call.drawIndirectCount[callID] = cnt;
                 }
 
-                bool used = false;
+                DE::DrawAttribs DA = {};
+                if(context->flags & NVGCreateFlags::NVG_DEBUG)
+                    DA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
+                DA.FirstInstanceLocation = uniform;
                 for(int i = 0; i < call.pathCount; ++i) {
                     const auto& path = context->pathBuffer[call.pathOffset + i];
                     if(path.strokeCount > 0) {
-                        DE::DrawAttribs DA = {};
                         DA.NumVertices = path.strokeCount;
                         DA.StartVertexLocation = path.strokeOffset;
-                        DA.FirstInstanceLocation = uniform;
-                        if(context->flags & NVGCreateFlags::NVG_DEBUG)
-                            DA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
-                        if(used)
-                            DA.Flags |=
-                                DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
-                        else
-                            used = true;
                         if(mode == DrawMode::IndirectCallGen)
                             pushIndirect(DA);
-                        else
+                        else {
                             immediateContext->Draw(DA);
+                            DA.Flags |=
+                                DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
+                        }
                     }
                 }
             }
@@ -875,7 +865,7 @@ static void nvgde_renderFlush(void* uptr) {
                 context->pathBuffer.cbegin() + call.pathOffset + call.pathCount,
                 [](const NVGDEPath& path) { return path.fillCount > 2; }));
 
-            if(cnt == 0)
+            if(cnt == 0 || (mode == DrawMode::IndirectCallGen && cnt == 1))
                 return;
 
             primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -887,25 +877,18 @@ static void nvgde_renderFlush(void* uptr) {
 
             prepareRendering(image);
 
-            if(mode == DrawMode::IndirectCallCommit) {
-                bool used = false;
-                for(int i = 0; i < call.drawIndirectCount[callID]; ++i) {
-                    DE::DrawIndexedIndirectAttribs DIIA = {};
-                    DIIA.IndexType = DE::VT_UINT32;
-                    if(context->flags & NVG_DEBUG)
-                        DIIA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
-                    if(used)
-                        DIIA.Flags |=
-                            DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
-                    else
-                        used = true;
-                    DIIA.IndirectAttribsBufferStateTransitionMode =
-                        DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION;
-                    DIIA.IndirectDrawArgsOffset = sizeof(DE::Uint32) *
-                        (call.drawIndirectOffset[callID] + i * 5);
-                    immediateContext->DrawIndexedIndirect(
-                        DIIA, context->indirectCall);
-                }
+            if(mode == DrawMode::IndirectCallCommit && cnt > 1) {
+                DE::DrawIndexedIndirectAttribs DIIA = {};
+                DIIA.IndexType = DE::VT_UINT32;
+                if(context->flags & NVG_DEBUG)
+                    DIIA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
+                DIIA.IndirectAttribsBufferStateTransitionMode =
+                    DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION;
+                DIIA.IndirectDrawArgsOffset =
+                    sizeof(DE::Uint32) * call.drawIndirectOffset[callID];
+                immediateContext->MultiDrawIndexedIndirect(
+                    DIIA, context->indirectCall,
+                    call.drawIndirectCount[callID]);
             } else {
                 if(mode == DrawMode::IndirectCallGen) {
                     call.drawIndirectOffset[callID] =
@@ -913,27 +896,24 @@ static void nvgde_renderFlush(void* uptr) {
                     call.drawIndirectCount[callID] = cnt;
                 }
 
-                bool used = false;
+                DE::DrawIndexedAttribs DIA = {};
+                DIA.IndexType = DE::VT_UINT32;
+                if(context->flags & NVGCreateFlags::NVG_DEBUG)
+                    DIA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
+                DIA.FirstInstanceLocation = uniform;
                 for(int i = 0; i < call.pathCount; ++i) {
                     const auto& path = context->pathBuffer[call.pathOffset + i];
                     if(path.fillCount > 2) {
-                        DE::DrawIndexedAttribs DIA = {};
-                        DIA.FirstInstanceLocation = uniform;
                         DIA.BaseVertex = path.fillOffset;
-                        DIA.IndexType = DE::VT_UINT32;
                         DIA.NumIndices =
                             3U * static_cast<DE::Uint32>(path.fillCount - 2);
-                        if(context->flags & NVGCreateFlags::NVG_DEBUG)
-                            DIA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
-                        if(used)
-                            DIA.Flags |=
-                                DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
-                        else
-                            used = true;
                         if(mode == DrawMode::IndirectCallGen)
                             pushIndirectIndex(DIA);
-                        else
+                        else {
                             immediateContext->DrawIndexed(DIA);
+                            DIA.Flags |=
+                                DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
+                        }
                     }
                 }
             }
@@ -942,35 +922,18 @@ static void nvgde_renderFlush(void* uptr) {
         auto drawTriangle = [&](NVGDECall& call, int image,
                                 DE::PRIMITIVE_TOPOLOGY pt, int uniform,
                                 int callID) {
-            if(call.triangleCount == 0)
+            if(call.triangleCount == 0 || mode == DrawMode::IndirectCallGen)
                 return;
             primitiveTopology = pt;
             prepareRendering(image);
 
-            if(mode == DrawMode::IndirectCallCommit) {
-                DE::DrawIndirectAttribs DIA = {};
-                if(context->flags & NVGCreateFlags::NVG_DEBUG)
-                    DIA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
-                DIA.IndirectAttribsBufferStateTransitionMode =
-                    DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION;
-                DIA.IndirectDrawArgsOffset =
-                    sizeof(DE::Uint32) * call.drawIndirectOffset[callID];
-                immediateContext->DrawIndirect(DIA, context->indirectCall);
-            } else {
-                DE::DrawAttribs DA = {};
-                DA.FirstInstanceLocation = uniform;
-                DA.NumVertices = call.triangleCount;
-                DA.StartVertexLocation = call.triangleOffset;
-                if(context->flags & NVGCreateFlags::NVG_DEBUG)
-                    DA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
-                if(mode == DrawMode::DirectCall)
-                    immediateContext->Draw(DA);
-                else {
-                    call.drawIndirectOffset[callID] =
-                        static_cast<int>(indirectBuffer.size());
-                    pushIndirect(DA);
-                }
-            }
+            DE::DrawAttribs DA = {};
+            DA.FirstInstanceLocation = uniform;
+            DA.NumVertices = call.triangleCount;
+            DA.StartVertexLocation = call.triangleOffset;
+            if(context->flags & NVGCreateFlags::NVG_DEBUG)
+                DA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
+            immediateContext->Draw(DA);
         };
 
         for(auto& call : context->calls) {

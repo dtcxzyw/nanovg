@@ -177,28 +177,35 @@ struct StateHasher final {
 };
 
 struct NVGDEContext final {
+    // Interface and Configuration
     DE::IRenderDevice* device;
     DE::IDeviceContext* context;
     DE::SampleDesc MSAA;
     int flags;
     DE::TEXTURE_FORMAT colorFormat, depthFormat;
 
+    // Pipeline static
     DE::RefCntAutoPtr<DE::IShader> pVS, pPS;
     DE::PipelineStateDesc defaultState;
 
+    // Pipeline and SRV dynamic
     StateCache<DE::PipelineStateDesc, NVGDEPipelineState, StateHasher> pipeline;
     ResourceManager<NVGDETexture> texture;
     DE::RefCntAutoPtr<DE::IBuffer> viewConstant;
     DE::RefCntAutoPtr<DE::IBuffer> triangleFansIndex;
-    int indexSize;
     DE::RefCntAutoPtr<DE::IBuffer> vertBuffer;
     DE::RefCntAutoPtr<DE::IBuffer> uniformBuffer, uidBuffer;
     DE::RefCntAutoPtr<DE::IBufferView> uniformSRV;
 
+    // Host Buffer
     std::vector<NVGvertex> vertBufferHost;
     std::vector<NVGDEPath> pathBuffer;
     std::vector<Uniform> uniformBufferHost;
     std::vector<NVGDECall> calls;
+
+    // IndirectDraw
+    bool useIndirectDraw;
+    DE::RefCntAutoPtr<DE::IBuffer> indirectCall;
 };
 
 static const char* vertShader = R"(
@@ -335,9 +342,13 @@ static int nearestPowerOf2(int siz) {
     return res;
 };
 static void prepareTriangleFansIndexBuffer(NVGDEContext* context, int siz) {
-    if(siz <= context->indexSize)
+    int oldSiz = context->triangleFansIndex ?
+        context->triangleFansIndex->GetDesc().uiSizeInBytes /
+            (3 * sizeof(int)) :
+        0;
+    if(siz <= oldSiz)
         return;
-    siz = context->indexSize = nearestPowerOf2(siz);
+    siz = nearestPowerOf2(siz);
     context->triangleFansIndex.Release();
     DE::BufferDesc bufferDesc = {};
     bufferDesc.BindFlags = DE::BIND_INDEX_BUFFER;
@@ -360,11 +371,6 @@ static void prepareTriangleFansIndexBuffer(NVGDEContext* context, int siz) {
     bufferData.pData = index.data();
     context->device->CreateBuffer(bufferDesc, &bufferData,
                                   &(context->triangleFansIndex));
-    /*
-    context->context->SetIndexBuffer(
-        context->triangleFansIndex, 0U,
-        DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-        */
 }
 static void prepareVertexBuffer(NVGDEContext* context, int siz) {
     int oldSiz = context->vertBuffer ?
@@ -738,6 +744,7 @@ static void nvgde_renderFlush(void* uptr) {
             return;
         primitiveTopology = DE::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
         prepareRendering(image);
+        bool used = false;
         for(int i = 0; i < call.pathCount; ++i) {
             const auto& path = context->pathBuffer[call.pathOffset + i];
             if(path.strokeCount > 0) {
@@ -746,7 +753,11 @@ static void nvgde_renderFlush(void* uptr) {
                 DA.StartVertexLocation = path.strokeOffset;
                 DA.FirstInstanceLocation = uniform;
                 if(context->flags & NVGCreateFlags::NVG_DEBUG)
-                    DA.Flags = DE::DRAW_FLAG_VERIFY_ALL;
+                    DA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
+                if(used)
+                    DA.Flags |= DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
+                else
+                    used = true;
                 immediateContext->Draw(DA);
             }
         }
@@ -765,6 +776,7 @@ static void nvgde_renderFlush(void* uptr) {
             DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
 
         prepareRendering(image);
+        bool used = false;
         for(int i = 0; i < call.pathCount; ++i) {
             const auto& path = context->pathBuffer[call.pathOffset + i];
             if(path.fillCount > 2) {
@@ -775,7 +787,11 @@ static void nvgde_renderFlush(void* uptr) {
                 DIA.NumIndices =
                     3U * static_cast<DE::Uint32>(path.fillCount - 2);
                 if(context->flags & NVGCreateFlags::NVG_DEBUG)
-                    DIA.Flags = DE::DRAW_FLAG_VERIFY_ALL;
+                    DIA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
+                if(used)
+                    DIA.Flags |= DE::DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT;
+                else
+                    used = true;
                 immediateContext->DrawIndexed(DIA);
             }
         }
@@ -792,7 +808,7 @@ static void nvgde_renderFlush(void* uptr) {
         DA.NumVertices = call.triangleCount;
         DA.StartVertexLocation = call.triangleOffset;
         if(context->flags & NVGCreateFlags::NVG_DEBUG)
-            DA.Flags = DE::DRAW_FLAG_VERIFY_ALL;
+            DA.Flags |= DE::DRAW_FLAG_VERIFY_ALL;
         immediateContext->Draw(DA);
     };
 
@@ -1218,7 +1234,8 @@ NVGcontext* nvgCreateDE(DE::IRenderDevice* device, DE::IDeviceContext* context,
     ptr->colorFormat = colorFormat;
     ptr->depthFormat = depthFormat;
     ptr->flags = flags;
-    ptr->indexSize = 0;
+
+    ptr->useIndirectDraw = device->GetDeviceCaps().Features.IndirectRendering;
 
     NVGparams params = {};
     params.edgeAntiAlias = (flags & NVGCreateFlags::NVG_ANTIALIAS);

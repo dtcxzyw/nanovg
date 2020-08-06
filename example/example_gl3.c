@@ -16,6 +16,8 @@
 // 3. This notice may not be removed or altered from any source distribution.
 //
 
+#define DEMO_MSAA
+
 #include <stdio.h>
 #ifdef NANOVG_GLEW
 #	include <GL/glew.h>
@@ -83,7 +85,7 @@ int main()
 	glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, 1);
 
 #ifdef DEMO_MSAA
-	glfwWindowHint(GLFW_SAMPLES, 4);
+	glfwWindowHint(GLFW_SAMPLES, 8);
 #endif
 	window = glfwCreateWindow(1000, 600, "NanoVG", NULL, NULL);
 //	window = glfwCreateWindow(1000, 600, "NanoVG", glfwGetPrimaryMonitor(), NULL);

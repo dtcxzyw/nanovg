@@ -722,7 +722,7 @@ static void nvgde_renderCancel(void* uptr) {
 enum class DrawMode { IndirectCallGen, IndirectCallCommit, DirectCall };
 
 static void nvgde_renderFlush(void* uptr) {
-    // TODO:batch/Multithreading/reduce GL state change
+    // TODO:batch/Multithreading
 
     auto context = reinterpret_cast<NVGDEContext*>(uptr);
     auto immediateContext = context->context;

@@ -400,7 +400,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
     ShowWindow(hwnd, cmdShow);
     UpdateWindow(hwnd);
 
-    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_GL);
+    gEngine = std::make_unique<Engine>(hwnd, DE::RENDER_DEVICE_TYPE_VULKAN);
 
     DemoData data;
     NVGcontext* vg = NULL;
@@ -434,9 +434,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
     vg = nvgCreateDE(
         gEngine->device, gEngine->immediateContext, msaa,
         SDesc.ColorBufferFormat, SDesc.DepthBufferFormat,
-        static_cast<int>((msaa.Count == 1 ? NVGCreateFlags::NVG_ANTIALIAS : 0) |
-                         NVG_ALLOW_INDIRECT_RENDERING
-    // | NVGCreateFlags::NVG_STENCIL_STROKES
+        static_cast<int>((msaa.Count == 1 ? NVGCreateFlags::NVG_ANTIALIAS : 0)
+                          | NVG_ALLOW_INDIRECT_RENDERING
+                         | NVGCreateFlags::NVG_STENCIL_STROKES
 #ifdef _DEBUG
                          | NVGCreateFlags::NVG_DEBUG
 #endif

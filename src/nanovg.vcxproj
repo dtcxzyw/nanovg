@@ -26,6 +26,7 @@
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v142</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -51,11 +52,33 @@
     <ClCompile>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
+    <PostBuildEvent>
+      <Message>Copy files</Message>
+      <Command>copy $(ProjectDir)*.h $(SolutionDir)install\include /y
+copy $(ProjectDir)*.hpp $(SolutionDir)install\include /y
+copy $(OutDir)nanovg.lib $(SolutionDir)install\lib\$(Configuration) /y
+copy $(OutDir)nanovg.pdb $(SolutionDir)install\lib\$(Configuration) /y
+</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <OmitFramePointers>true</OmitFramePointers>
+      <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
+      <WholeProgramOptimization>true</WholeProgramOptimization>
     </ClCompile>
+    <PostBuildEvent>
+      <Message>Copy files</Message>
+      <Command>copy $(ProjectDir)*.h $(SolutionDir)install\include /y
+copy $(ProjectDir)*.hpp $(SolutionDir)install\include /y
+copy $(OutDir)nanovg.lib $(SolutionDir)install\lib\$(Configuration) /y
+copy $(OutDir)nanovg.pdb $(SolutionDir)install\lib\$(Configuration) /y
+</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="nanovg.c" />

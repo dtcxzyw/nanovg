@@ -401,7 +401,7 @@ static void prepareVertexBuffer(NVGDEContext* context, int siz,
                                       &(context->vertBuffer));
     }
 
-    if(siz) {
+    if(siz && data) {
         context->context->UpdateBuffer(
             context->vertBuffer, 0U, static_cast<int>(siz * sizeof(NVGvertex)),
             data, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
@@ -452,7 +452,7 @@ static void prepareUniformBuffer(NVGDEContext* context, int siz,
             pipe.second.SRB.Release();
     }
 
-    if(siz)
+    if(siz && data)
         context->context->UpdateBuffer(
             context->uniformBuffer, 0U, static_cast<int>(siz * sizeof(Uniform)),
             data, DE::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
@@ -476,7 +476,7 @@ static void prepareIndirectCallBuffer(NVGDEContext* context, int siz,
         context->device->CreateBuffer(bufferDesc, nullptr,
                                       &(context->indirectCall));
     }
-    if(siz)
+    if(siz && data)
         context->context->UpdateBuffer(
             context->indirectCall, 0U,
             static_cast<int>(siz * sizeof(DE::Uint32)), data,
